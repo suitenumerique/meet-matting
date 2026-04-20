@@ -74,8 +74,26 @@ class RVMWrapper(BaseModelWrapper):
             selected_providers.append("CUDAExecutionProvider")
         selected_providers.append("CPUExecutionProvider")
 
+        sess_options = ort.SessionOptions()
+        sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+
+        # CoreML specific optimizations if on Mac
+        actual_providers = []
+        for p in selected_providers:
+            if p == "CoreMLExecutionProvider":
+                actual_providers.append(
+                    ("CoreMLExecutionProvider", {
+                        "MLComputeUnits": "ALL",
+                        "convert_model_to_fp16": True  # Enable FP16 inference on Mac
+                    })
+                )
+            else:
+                actual_providers.append(p)
+
         self._session = ort.InferenceSession(
-            str(self._model_path), providers=selected_providers
+            str(self._model_path), 
+            providers=actual_providers,
+            sess_options=sess_options
         )
         self.reset_state()
         logger.info("RVM: modèle ONNX chargé (%s).", self._model_path.name)

@@ -14,6 +14,11 @@ import sys
 import os
 from pathlib import Path
 import time
+import logging
+
+# Silence Streamlit context warnings that spam the console during parallel processing
+logging.getLogger("streamlit.runtime.scriptrunner_utils.script_run_context").setLevel(logging.ERROR)
+logging.getLogger("streamlit.runtime.state.session_state_proxy").setLevel(logging.ERROR)
 
 # Ajouter le parent au path pour importer les modules benchmark
 sys.path.append(str(Path(__file__).parent.parent))
@@ -86,26 +91,64 @@ st.markdown("---")
 col1, col2 = st.columns([1, 2])
 
 with col1:
-    st.subheader("🤖 Modèles")
-    st.write("Sélectionnez les modèles à évaluer :")
+    st.subheader("🤖 Sélection des Modèles")
+    st.write("Cochez les modèles que vous souhaitez inclure dans le benchmark.")
     
-    # Boutons de sélection groupée
-    c1, c2 = st.columns(2)
-    if c1.button("Tout sélectionner"):
+    # Barre d'outils de sélection
+    c1, c2, c3 = st.columns([1, 1, 1])
+    if c1.button("✅ Tout cocher"):
         st.session_state.selected_models = list(MODEL_REGISTRY.keys())
-    if c2.button("Tout désélectionner"):
+        st.rerun()
+    if c2.button("❌ Tout décocher"):
         st.session_state.selected_models = []
+        st.rerun()
 
     if 'selected_models' not in st.session_state:
         st.session_state.selected_models = list(MODEL_REGISTRY.keys())
 
-    selected_models = st.multiselect(
-        "Modèles actifs",
-        options=list(MODEL_REGISTRY.keys()),
-        default=st.session_state.selected_models,
-        format_func=lambda x: MODEL_REGISTRY[x]().name,
-        key="model_multiselect"
-    )
+    # Grille de cartes de modèles
+    st.markdown("---")
+    
+    # Métadonnées pour enrichir l'UI
+    model_info = {
+        "mediapipe": {"tag": "⚡ RAPIDE", "desc": "Solution Google optimisée mobile", "color": "#28a745"},
+        "rvm": {"tag": "🎬 VIDÉO", "desc": "Cohérence temporelle récurrente", "color": "#007bff"},
+        "modnet": {"tag": "💎 QUALITÉ", "desc": "Portrait matting haute résolution", "color": "#6f42c1"},
+        "pphumanseg": {"tag": "📱 MOBILE", "desc": "Ultra-léger par PaddleSeg", "color": "#fd7e14"},
+        "efficientvit": {"tag": "🚀 SOTA", "desc": "Transformer haute performance", "color": "#dc3545"},
+        "mobilenetv3": {"tag": "⚖️ ÉQUILIBRE", "desc": "Standard industriel léger", "color": "#6c757d"},
+    }
+
+    selected_list = []
+    
+    # On itère par groupes pour faire des rangées de 2
+    keys = list(MODEL_REGISTRY.keys())
+    for i in range(0, len(keys), 2):
+        row_cols = st.columns(2)
+        for j in range(2):
+            if i + j < len(keys):
+                key = keys[i+j]
+                m_instance = MODEL_REGISTRY[key]()
+                info = model_info.get(key, {"tag": "MODÈLE", "desc": "Segmentation Personne", "color": "#333"})
+                
+                with row_cols[j]:
+                    # Conteneur stylisé pour la "carte"
+                    with st.container(border=True):
+                        is_selected = st.checkbox(
+                            f"**{m_instance.name}**", 
+                            value=(key in st.session_state.selected_models),
+                            key=f"cb_{key}",
+                            help=info['desc']
+                        )
+                        st.markdown(f"<span style='background-color:{info['color']}; color:white; padding:2px 6px; border-radius:4px; font-size:10px; font-weight:bold;'>{info['tag']}</span>", unsafe_allow_html=True)
+                        st.caption(info['desc'])
+                        
+                        if is_selected:
+                            selected_list.append(key)
+
+    # Mise à jour de l'état
+    st.session_state.selected_models = selected_list
+    selected_models = selected_list
 
 with col2:
     st.subheader("ℹ️ Aperçu du Benchmark")
@@ -170,7 +213,7 @@ if launch_btn:
             if "latency_p95_ms" in df_display.columns:
                 styled_df = styled_df.highlight_min(subset=["latency_p95_ms"], color='#d4edda')
             
-            st.dataframe(styled_df, use_container_width=True)
+            st.dataframe(styled_df, width='stretch')
             
             # Métriques moyennes par modèle
             st.subheader("📈 Moyennes par Modèle")
@@ -193,4 +236,4 @@ else:
     if res_path.exists():
         st.subheader("Last Run Results")
         old_df = pd.read_csv(res_path)
-        st.dataframe(old_df.head(10), use_container_width=True)
+        st.dataframe(old_df.head(10), width='stretch')

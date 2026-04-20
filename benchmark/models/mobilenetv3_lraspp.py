@@ -8,10 +8,9 @@ Ce modèle est entraîné sur COCO/VOC avec une classe "person" (label 15).
 """
 
 import logging
-from typing import Optional, Tuple
-
 import cv2
 import numpy as np
+from typing import List, Optional, Tuple
 
 from .base import BaseModelWrapper
 
@@ -70,48 +69,63 @@ class MobileNetV3LRASPPWrapper(BaseModelWrapper):
         )
 
     def predict(self, frame_bgr: np.ndarray) -> np.ndarray:
+        return self.predict_batch([frame_bgr])[0]
+
+    def predict_batch(self, frames_bgr: List[np.ndarray]) -> List[np.ndarray]:
         if self._model is None:
             raise RuntimeError("MobileNetV3+LRASPP: modèle non chargé.")
 
         import torch
 
-        h_orig, w_orig = frame_bgr.shape[:2]
+        batch_size = len(frames_bgr)
+        if batch_size == 0:
+            return []
+
+        h_orig, w_orig = frames_bgr[0].shape[:2]
 
         # Pre-processing
-        frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-        frame_resized = cv2.resize(frame_rgb, (256, 256))
-
-        # Normalisation ImageNet
+        tensors = []
         mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
         std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
-        tensor = (frame_resized.astype(np.float32) / 255.0 - mean) / std
-        tensor = np.transpose(tensor, (2, 0, 1))  # CHW
-        tensor = np.expand_dims(tensor, axis=0)     # NCHW
+        
+        for frame in frames_bgr:
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            frame_resized = cv2.resize(frame_rgb, (256, 256))
+            tensor = (frame_resized.astype(np.float32) / 255.0 - mean) / std
+            tensor = np.transpose(tensor, (2, 0, 1))
+            tensors.append(tensor)
 
-        input_tensor = torch.from_numpy(tensor).to(self._device)
+        input_batch = torch.from_numpy(np.stack(tensors)).to(self._device)
 
         with torch.no_grad():
-            output = self._model(input_tensor)["out"]  # (1, 21, H, W)
+            output = self._model(input_batch)["out"]  # (N, 21, H, W)
 
         # Extraire la probabilité de la classe "person"
         probs = torch.softmax(output, dim=1)
-        person_mask = probs[0, self.PERSON_CLASS_INDEX].cpu().numpy()
+        
+        masks = []
+        for i in range(batch_size):
+            person_mask = probs[i, self.PERSON_CLASS_INDEX].cpu().numpy()
 
-        # Resize vers la taille originale
-        if person_mask.shape != (h_orig, w_orig):
-            person_mask = cv2.resize(
-                person_mask, (w_orig, h_orig), interpolation=cv2.INTER_LINEAR
-            )
+            # Resize vers la taille originale
+            if person_mask.shape != (h_orig, w_orig):
+                person_mask = cv2.resize(
+                    person_mask, (w_orig, h_orig), interpolation=cv2.INTER_LINEAR
+                )
+            masks.append(person_mask.astype(np.float32))
 
-        return person_mask.astype(np.float32)
+        return masks
 
     def get_flops(self, input_shape: Tuple[int, int, int] = (3, 256, 256)) -> float:
         try:
             import torch
             from fvcore.nn import FlopCountAnalysis
+            
+            # Silence internal fvcore warnings about unsupported operators
+            logging.getLogger("fvcore.nn.jit_analysis").setLevel(logging.ERROR)
 
             dummy = torch.randn(1, *input_shape).to(self._device)
-            flops = FlopCountAnalysis(self._model, dummy)
+            flops = FlopCountAnalysis(self._model, dummy).unsupported_ops_warnings(False)
             return float(flops.total())
         except ImportError:
             logger.warning(

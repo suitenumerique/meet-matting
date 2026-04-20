@@ -11,10 +11,9 @@ Modèle : https://github.com/ZHKKKe/MODNet
 
 import logging
 from pathlib import Path
-from typing import Optional, Tuple
-
 import cv2
 import numpy as np
+from typing import List, Optional, Tuple
 
 from .base import BaseModelWrapper
 
@@ -68,8 +67,26 @@ class MODNetWrapper(BaseModelWrapper):
             selected_providers.append("CUDAExecutionProvider")
         selected_providers.append("CPUExecutionProvider")
 
+        sess_options = ort.SessionOptions()
+        sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+
+        # CoreML specific optimizations if on Mac
+        actual_providers = []
+        for p in selected_providers:
+            if p == "CoreMLExecutionProvider":
+                actual_providers.append(
+                    ("CoreMLExecutionProvider", {
+                        "MLComputeUnits": "ALL",
+                        "convert_model_to_fp16": True  # Enable FP16 inference on Mac
+                    })
+                )
+            else:
+                actual_providers.append(p)
+
         self._session = ort.InferenceSession(
-            str(self._model_path), providers=selected_providers
+            str(self._model_path), 
+            providers=actual_providers,
+            sess_options=sess_options
         )
         self._input_name = self._session.get_inputs()[0].name
         logger.info("MODNet: modèle ONNX chargé (%s).", self._model_path.name)
@@ -83,33 +100,61 @@ class MODNetWrapper(BaseModelWrapper):
         logger.info("MODNet: téléchargement terminé.")
 
     def predict(self, frame_bgr: np.ndarray) -> np.ndarray:
+        return self.predict_batch([frame_bgr])[0]
+
+    def predict_batch(self, frames_bgr: List[np.ndarray]) -> List[np.ndarray]:
         if self._session is None:
             raise RuntimeError("MODNet: modèle non chargé. Appelle load() d'abord.")
 
-        h_orig, w_orig = frame_bgr.shape[:2]
+        batch_size = len(frames_bgr)
+        if batch_size == 0:
+            return []
 
+        h_orig, w_orig = frames_bgr[0].shape[:2]
+        
         # Pre-processing : BGR -> RGB, resize, normalise
-        frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-        frame_resized = cv2.resize(frame_rgb, (self._ref_size, self._ref_size))
+        tensors = []
+        for frame in frames_bgr:
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            frame_resized = cv2.resize(frame_rgb, (self._ref_size, self._ref_size))
 
-        # Normalisation [0, 1] puis standardisation MODNet
-        tensor = frame_resized.astype(np.float32) / 255.0
-        tensor = (tensor - 0.5) / 0.5  # [-1, 1]
-        tensor = np.transpose(tensor, (2, 0, 1))   # CHW
-        tensor = np.expand_dims(tensor, axis=0)      # NCHW
+            # Normalisation [0, 1] puis standardisation MODNet
+            tensor = frame_resized.astype(np.float32) / 255.0
+            tensor = (tensor - 0.5) / 0.5  # [-1, 1]
+            tensor = np.transpose(tensor, (2, 0, 1))   # CHW
+            tensors.append(tensor)
+
+        # Concaténer pour former un batch (N, 3, H, W)
+        batch_tensor = np.stack(tensors, axis=0)
 
         # Inférence
-        output = self._session.run(None, {self._input_name: tensor})
-        alpha = output[0]  # (1, 1, H, W)
+        try:
+            output = self._session.run(None, {self._input_name: batch_tensor})
+            alphas_batch = output[0]
+        except Exception as e:
+            if "Got: " in str(e) and "Expected: 1" in str(e):
+                logger.debug("MODNet: Batching non supporté par le modèle, repli sur itération.")
+                alphas_batch = []
+                for i in range(batch_size):
+                    t = np.expand_dims(batch_tensor[i], axis=0)
+                    out = self._session.run(None, {self._input_name: t})
+                    alphas_batch.append(out[0][0])
+                alphas_batch = np.array(alphas_batch)
+            else:
+                raise e
 
-        mask = alpha[0, 0]  # (H, W)
-        mask = np.clip(mask, 0.0, 1.0)
+        masks = []
+        for i in range(batch_size):
+            mask = alphas_batch[i, 0]  # (H, W)
+            mask = np.clip(mask, 0.0, 1.0)
 
-        # Resize vers la taille originale
-        if mask.shape != (h_orig, w_orig):
-            mask = cv2.resize(mask, (w_orig, h_orig), interpolation=cv2.INTER_LINEAR)
+            # Resize vers la taille originale
+            if mask.shape != (h_orig, w_orig):
+                mask = cv2.resize(mask, (w_orig, h_orig), interpolation=cv2.INTER_LINEAR)
+            
+            masks.append(mask.astype(np.float32))
 
-        return mask.astype(np.float32)
+        return masks
 
     def get_flops(self, input_shape: Tuple[int, int, int] = (3, 256, 256)) -> float:
         # MODNet : ~4 GFLOPs à 512x512

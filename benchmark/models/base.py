@@ -10,7 +10,7 @@ Chaque modèle DOIT implémenter :
 """
 
 from abc import ABC, abstractmethod
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 import numpy as np
 
@@ -58,6 +58,22 @@ class BaseModelWrapper(ABC):
             H,W doivent correspondre aux dimensions de la frame d'entrée.
         """
         ...
+
+    def predict_batch(self, frames_bgr: List[np.ndarray]) -> List[np.ndarray]:
+        """
+        Exécute l'inférence sur un lot de frames BGR.
+
+        Par défaut, cette méthode boucle sur predict().
+        Elle devrait être surchargée pour les modèles supportant le batching natif
+        (ex: ONNX, PyTorch) afin de maximiser l'utilisation du GPU.
+
+        Args:
+            frames_bgr: Liste de frames BGR (H, W, 3) en uint8.
+
+        Returns:
+            Liste de masques (H, W) en float32 [0, 1].
+        """
+        return [self.predict(f) for f in frames_bgr]
 
     @abstractmethod
     def get_flops(self, input_shape: Tuple[int, int, int] = (3, 256, 256)) -> float:

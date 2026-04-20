@@ -8,10 +8,12 @@ Métriques implémentées :
 """
 
 import logging
-from typing import List, Optional, Tuple
+from typing import Iterable, List, Optional, Tuple
 
 import cv2
 import numpy as np
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from functools import partial
 
 from .config import BOUNDARY_TOLERANCE_PX
 
@@ -151,7 +153,7 @@ def compute_boundary_f_measure(
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def compute_flow_warping_error(
     masks: List[np.ndarray],
-    frames: Optional[List[np.ndarray]] = None,
+    frames: Optional[Iterable[np.ndarray]] = None,
 ) -> float:
     """
     Calcule le Flow Warping Error moyen sur une séquence de masques.
@@ -161,7 +163,7 @@ def compute_flow_warping_error(
 
     Args:
         masks: Liste de masques (H, W) en float [0, 1], ordonnés temporellement.
-        frames: Liste de frames RGB (H, W, 3) correspondantes pour le calcul
+        frames: Itérable de frames RGB (H, W, 3) correspondantes pour le calcul
                 du flux optique. Si None, utilise les masques eux-mêmes.
 
     Returns:
@@ -171,6 +173,10 @@ def compute_flow_warping_error(
         return 0.0
 
     errors = []
+    
+    # Préparer l'itérateur de frames si fourni
+    frame_it = iter(frames) if frames is not None else None
+    frame_curr = next(frame_it, None) if frame_it else None
 
     for i in range(len(masks) - 1):
         mask_curr = masks[i].astype(np.float32)
@@ -182,11 +188,10 @@ def compute_flow_warping_error(
                 mask_curr, (mask_next.shape[1], mask_next.shape[0]),
                 interpolation=cv2.INTER_LINEAR,
             )
-
-        # Frames pour le flux optique
-        if frames is not None and len(frames) > i + 1:
-            frame_curr = frames[i]
-            frame_next = frames[i + 1]
+        
+        frame_next = next(frame_it, None) if frame_it else None
+        
+        if frame_curr is not None and frame_next is not None:
             if len(frame_curr.shape) == 3:
                 if frame_curr.shape[2] == 3:
                     gray_curr = cv2.cvtColor(frame_curr, cv2.COLOR_BGR2GRAY)
@@ -226,18 +231,23 @@ def compute_flow_warping_error(
             g_curr_small, g_next_small = gray_curr, gray_next
             m_curr_small, m_next_small = mask_curr, mask_next
 
-        # Calcul du flux optique dense (Farneback) sur résolution réduite
-        flow = cv2.calcOpticalFlowFarneback(
-            g_curr_small, g_next_small,
-            None,
-            pyr_scale=0.5,
-            levels=2,        # Réduit de 3 à 2 pour plus de vitesse
-            winsize=11,      # Réduit de 15 à 11
-            iterations=2,    # Réduit de 3 à 2
-            poly_n=5,
-            poly_sigma=1.1,
-            flags=0,
-        )
+        # Calcul du flux optique dense (DIS) sur résolution réduite — Beaucoup plus rapide que Farneback
+        if hasattr(cv2, 'DISOpticalFlow_create'):
+            dis = cv2.DISOpticalFlow_create(cv2.DISOPTICAL_FLOW_PRESET_FAST)
+            flow = dis.calc(g_curr_small, g_next_small, None)
+        else:
+            # Fallback Farneback si DIS absent
+            flow = cv2.calcOpticalFlowFarneback(
+                g_curr_small, g_next_small,
+                None,
+                pyr_scale=0.5,
+                levels=2,
+                winsize=11,
+                iterations=2,
+                poly_n=5,
+                poly_sigma=1.1,
+                flags=0,
+            )
 
         # Warping du masque courant vers le frame suivant
         h_s, w_s = m_curr_small.shape[:2]
@@ -255,6 +265,9 @@ def compute_flow_warping_error(
         # Erreur L1 entre masque warpé et masque réel (sur résolution réduite)
         error = np.abs(warped_mask - m_next_small).mean()
         errors.append(error)
+        
+        # Le frame "next" devient le "curr" pour la prochaine itération
+        frame_curr = frame_next
 
     return float(np.mean(errors))
 
@@ -262,24 +275,21 @@ def compute_flow_warping_error(
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Agrégation par vidéo
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+def _compute_single_frame_metrics(pair):
+    """Fonction helper pour le multiprocessing."""
+    pred, gt = pair
+    iou = compute_iou(pred, gt)
+    bf = compute_boundary_f_measure(pred, gt)
+    return iou, bf
+
+
 def compute_all_metrics(
     pred_masks: List[np.ndarray],
     gt_masks: List[np.ndarray],
-    frames: Optional[List[np.ndarray]] = None,
+    frames: Optional[Iterable[np.ndarray]] = None,
 ) -> dict:
     """
-    Calcule toutes les métriques de qualité sur une séquence vidéo.
-
-    Args:
-        pred_masks: Liste des masques prédits (H, W), float [0, 1].
-        gt_masks:   Liste des masques GT (H, W), float [0, 1].
-        frames:     Liste de frames RGB optionnelles pour le flux optique.
-
-    Returns:
-        Dict avec les clés :
-          - iou_mean, iou_std
-          - boundary_f_mean, boundary_f_std
-          - flow_warping_error
+    Calcule toutes les métriques de qualité sur une séquence vidéo en parallèle.
     """
     n = min(len(pred_masks), len(gt_masks))
     if n == 0:
@@ -292,17 +302,25 @@ def compute_all_metrics(
             "flow_warping_error": 0.0,
         }
 
+    # Parallélisation du calcul IoU et Boundary F (CPU bound)
+    pairs = list(zip(pred_masks[:n], gt_masks[:n]))
+    
     ious = []
     boundary_fs = []
-
-    for i in range(n):
-        ious.append(compute_iou(pred_masks[i], gt_masks[i]))
-        boundary_fs.append(compute_boundary_f_measure(pred_masks[i], gt_masks[i]))
+    
+    # On utilise un ThreadPool pour éviter les erreurs de pickling avec Streamlit/Multiprocessing
+    # OpenCV libère le GIL, donc le parallélisme est réel.
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        results = list(executor.map(_compute_single_frame_metrics, pairs))
+        
+    for iou, bf in results:
+        ious.append(iou)
+        boundary_fs.append(bf)
 
     # Flow warping error sur les prédictions
     fwe = compute_flow_warping_error(
         pred_masks[:n],
-        frames[:n] if frames else None,
+        frames,
     )
 
     return {

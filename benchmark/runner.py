@@ -15,11 +15,14 @@ import logging
 import shutil
 import time
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
-
 import cv2
 import numpy as np
 from tqdm import tqdm
+from typing import Dict, Iterable, List, Optional, Tuple, Generator
+import itertools
+from concurrent.futures import ThreadPoolExecutor
+import threading
+import queue
 
 from .config import (
     GROUND_TRUTH_DIR,
@@ -40,12 +43,87 @@ logger = logging.getLogger(__name__)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Utilitaires vidéo
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+def _get_video_info(video_path: Path) -> Tuple[int, float, Tuple[int, int]]:
+    """Retourne (nombre_frames, fps, (h, w)) d'une vidéo."""
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        raise IOError(f"Impossible d'ouvrir la vidéo : {video_path}")
+    
+    num_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    cap.release()
+    return num_frames, fps, (w, h)
+
+
+class VideoPrefetcher:
+    """Lit les frames d'une vidéo dans un thread séparé pour saturer l'inférence."""
+    def __init__(self, video_path: Path, queue_size: int = 32):
+        self.video_path = video_path
+        self.queue = queue.Queue(maxsize=queue_size)
+        self.stopped = False
+        self.thread = threading.Thread(target=self._run, daemon=True)
+
+    def start(self):
+        # Attacher le contexte Streamlit si on est dans un dashboard pour éviter les warnings
+        try:
+            from streamlit.runtime.scriptrunner import get_script_run_context, add_script_run_context
+            ctx = get_script_run_context()
+            if ctx:
+                add_script_run_context(self.thread)
+        except ImportError:
+            pass
+            
+        self.thread.start()
+        return self
+
+    def _run(self):
+        cap = cv2.VideoCapture(str(self.video_path))
+        while not self.stopped:
+            if not self.queue.full():
+                ret, frame = cap.read()
+                if not ret:
+                    self.stopped = True
+                    break
+                self.queue.put(frame)
+            else:
+                time.sleep(0.001)
+        cap.release()
+
+    def __iter__(self):
+        while not self.stopped or not self.queue.empty():
+            try:
+                frame = self.queue.get(timeout=1.0)
+                yield frame
+            except queue.Empty:
+                continue
+
+    def stop(self):
+        self.stopped = True
+        if self.thread.is_alive():
+            self.thread.join(timeout=1.0)
+
+
+def _iter_video_frames(video_path: Path) -> Generator[np.ndarray, None, None]:
+    """Générateur de frames pour une vidéo (économise la RAM)."""
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        raise IOError(f"Impossible d'ouvrir la vidéo : {video_path}")
+    
+    try:
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            yield frame
+    finally:
+        cap.release()
+
+
 def _read_video_frames(video_path: Path) -> Tuple[List[np.ndarray], float]:
     """
-    Lit toutes les frames d'une vidéo.
-
-    Returns:
-        (frames_bgr, fps) — liste de frames BGR uint8 et le FPS source.
+    Lit toutes les frames d'une vidéo (obsolète, préféré _iter_video_frames).
     """
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
@@ -61,7 +139,6 @@ def _read_video_frames(video_path: Path) -> Tuple[List[np.ndarray], float]:
         frames.append(frame)
 
     cap.release()
-    logger.info("Vidéo chargée : %s — %d frames @ %.1f FPS", video_path.name, len(frames), fps)
     return frames, fps
 
 
@@ -103,12 +180,27 @@ def _load_ground_truth_masks(gt_dir: Path, num_frames: int) -> List[np.ndarray]:
     return masks
 
 
-def _save_masks(masks: List[np.ndarray], output_dir: Path) -> None:
-    """Sauvegarde une liste de masques en PNG dans un répertoire."""
+def _save_masks(masks: List[np.ndarray], output_dir: Path, start_idx: int = 0) -> None:
+    """Sauvegarde une liste de masques en PNG dans un répertoire via un pool de threads."""
     output_dir.mkdir(parents=True, exist_ok=True)
-    for i, mask in enumerate(masks):
+    
+    def _save_single(idx, mask):
         mask_u8 = (mask * 255).clip(0, 255).astype(np.uint8)
-        cv2.imwrite(str(output_dir / f"mask_{i:06d}.png"), mask_u8)
+        cv2.imwrite(str(output_dir / f"mask_{idx:06d}.png"), mask_u8)
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        for i, mask in enumerate(masks):
+            executor.submit(_save_single, start_idx + i, mask)
+
+
+def _batched(iterable, n):
+    """Regroupe les éléments d'un itérable par lots de taille n."""
+    it = iter(iterable)
+    while True:
+        batch = list(itertools.islice(it, n))
+        if not batch:
+            break
+        yield batch
 
 
 import imageio
@@ -139,26 +231,29 @@ def _save_segmented_video(
     
     # Encoder haute performance (H.264) via imageio (utilise ffmpeg-static interne)
     # On spécifie 'libx264' et une qualité raisonnable pour la vitesse
+    import sys
+    # Utiliser l'encodeur matériel sur Mac si possible
+    codec = 'h264_videotoolbox' if sys.platform == 'darwin' else 'libx264'
+    
     writer = imageio.get_writer(
         str(output_path), 
         fps=fps, 
-        codec='libx264', 
-        quality=7, 
+        codec=codec, 
+        # quality=7 est remplacé par bitrate pour videotoolbox si nécessaire, 
+        # mais imageio tente de mapper quality vers les params ffmpeg.
         pixelformat='yuv420p',
         ffmpeg_log_level='error'
     )
     
     for mask, frame in zip(masks, frames):
-        # imageio attend du RGB, OpenCV produit du BGR
-        # Conversion robuste BGR(A) -> RGB
-        if frame.shape[2] == 4:
-            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGRA2RGB)
-        else:
-            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        # Conversion BGR -> RGB
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         
-        # Squeeze le masque pour s'assurer qu'il est 2D
-        mask_2d = mask.squeeze()
-        segmented = (frame_rgb * mask_2d[:, :, np.newaxis]).astype(np.uint8)
+        # Masque binaire pour éviter d'assombrir l'humain
+        mask_binary = (mask.squeeze() > 0.5).astype(np.float32)
+        
+        # Détourage
+        segmented = (frame_rgb * mask_binary[:, :, np.newaxis]).astype(np.uint8)
         writer.append_data(segmented)
     
     writer.close()
@@ -169,11 +264,13 @@ def _save_masks_as_video_fast(masks: List[np.ndarray], output_path: Path, fps: f
     if not masks:
         return
     
+    import sys
+    codec = 'h264_videotoolbox' if sys.platform == 'darwin' else 'libx264'
+
     writer = imageio.get_writer(
         str(output_path), 
         fps=fps, 
-        codec='libx264', 
-        quality=7,
+        codec=codec, 
         pixelformat='yuv420p',
         ffmpeg_log_level='error'
     )
@@ -205,47 +302,55 @@ def _load_masks(masks_dir: Path) -> List[np.ndarray]:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def run_inference(
     model: BaseModelWrapper,
-    frames: List[np.ndarray],
+    video_path: Path,
     output_dir: Path,
+    batch_size: int = 8,
+    collect_masks: bool = True,
 ) -> Dict:
     """
-    Exécute l'inférence sur toutes les frames et mesure les performances.
-
-    Returns:
-        Dict avec :
-          - latencies_ms : liste des latences par frame (ms)
-          - latency_p95_ms : latence au percentile configuré
-          - flops_per_frame : FLOPs estimés
+    Exécute l'inférence sur une vidéo en streaming avec prefetching et batching.
     """
     latencies = []
-    masks = []
-
-    model.reset_state()
-
-    h, w = frames[0].shape[:2]
+    total_frames = 0
+    masks_in_ram = [] if collect_masks else None
+    
+    num_frames, fps, (w, h) = _get_video_info(video_path)
     input_shape = (3, h, w)
 
-    logger.info("Inférence %s sur %d frames…", model.name, len(frames))
+    model.reset_state()
+    logger.info("Inférence %s sur %s (prefetch actif)…", model.name, video_path.name)
 
-    for i, frame in enumerate(tqdm(frames, desc=f"  ⚡ {model.name}", unit="frame")):
-        t_start = time.perf_counter()
-        mask = model.predict(frame)
-        t_end = time.perf_counter()
+    # Préparer le prefetcher
+    prefetcher = VideoPrefetcher(video_path, queue_size=batch_size * 2).start()
 
-        masks.append(mask)
+    with tqdm(total=num_frames, desc=f"  ⚡ {model.name}", unit="frame") as pbar:
+        frame_idx = 0
+        for batch in _batched(prefetcher, batch_size):
+            t_start = time.perf_counter()
+            masks = model.predict_batch(batch)
+            t_end = time.perf_counter()
+            
+            latency_per_frame = ((t_end - t_start) * 1000.0) / len(batch)
+            
+            for m in masks:
+                if frame_idx >= WARMUP_FRAMES:
+                    latencies.append(latency_per_frame)
+                if collect_masks:
+                    masks_in_ram.append(m)
+                frame_idx += 1
 
-        # Ignorer les frames de warm-up pour la latence
-        if i >= WARMUP_FRAMES:
-            latencies.append((t_end - t_start) * 1000.0)  # ms
+            # Sauvegarde disque uniquement si nécessaire (IO bypass)
+            if output_dir:
+                _save_masks(masks, output_dir, start_idx=frame_idx - len(batch))
+            
+            pbar.update(len(batch))
+            total_frames += len(batch)
 
-    # Sauvegarder les masques temporairement
-    _save_masks(masks, output_dir)
+    prefetcher.stop()
 
-    # Calcul des stats de latence
+    # Calcul des stats
     latencies_arr = np.array(latencies) if latencies else np.array([0.0])
     p95 = float(np.percentile(latencies_arr, LATENCY_PERCENTILE))
-
-    # FLOPs
     flops = model.get_flops(input_shape)
 
     result = {
@@ -254,8 +359,8 @@ def run_inference(
         "latency_mean_ms": float(latencies_arr.mean()),
         "latency_std_ms": float(latencies_arr.std()),
         "flops_per_frame": flops,
-        "num_frames": len(frames),
-        "masks_temp": masks,  # Conservé pour la compilation vidéo
+        "num_frames": total_frames,
+        "masks": masks_in_ram,
     }
 
     logger.info(
@@ -270,17 +375,16 @@ def run_inference(
 #  Étape 2 : Évaluation
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def run_evaluation(
-    masks_dir: Path,
+    masks_dir: Optional[Path],
     gt_masks: List[np.ndarray],
-    frames: Optional[List[np.ndarray]] = None,
+    video_path: Optional[Path] = None,
+    masks: Optional[List[np.ndarray]] = None,
 ) -> Dict:
     """
-    Charge les masques sauvegardés et calcule les métriques vs GT.
-
-    Returns:
-        Dict avec les métriques (IoU, Boundary F, Flow Warping Error).
+    Calcule les métriques vs GT.
+    Peut prendre soit un répertoire de masques (disque), soit une liste (RAM).
     """
-    pred_masks = _load_masks(masks_dir)
+    pred_masks = masks if masks else _load_masks(masks_dir)
 
     if not pred_masks:
         logger.error("Aucun masque prédit trouvé dans %s", masks_dir)
@@ -294,7 +398,9 @@ def run_evaluation(
 
     logger.info("Évaluation : %d masques prédits vs %d GT", len(pred_masks), len(gt_masks))
 
-    metrics = compute_all_metrics(pred_masks, gt_masks, frames)
+    frames_iter = _iter_video_frames(video_path) if video_path else None
+    
+    metrics = compute_all_metrics(pred_masks, gt_masks, frames_iter)
 
     logger.info(
         "Résultats — IoU: %.4f ± %.4f | BoundaryF: %.4f ± %.4f | FWE: %.4f",
@@ -456,22 +562,28 @@ def run_benchmark(
             }
 
             try:
-                # ── Charger les frames ──
-                frames, fps = _read_video_frames(video_path)
-                if not frames:
-                    raise ValueError("Vidéo vide ou corrompue.")
-
+                # ── Infos vidéo ──
+                num_frames, fps, (w_h) = _get_video_info(video_path)
                 result_entry["fps_source"] = fps
-                result_entry["resolution"] = f"{frames[0].shape[1]}x{frames[0].shape[0]}"
+                result_entry["resolution"] = f"{w_h[0]}x{w_h[1]}"
 
                 # ── Charger le GT ──
-                gt_masks = _load_ground_truth_masks(gt_path, len(frames))
+                gt_masks = _load_ground_truth_masks(gt_path, num_frames)
                 if not gt_masks:
                     logger.warning("Pas de GT disponible pour %s.", video_path.name)
 
-                # ── Étape 1 : Inférence ──
+                # ── Étape 1 : Inférence (Streaming + Prefetch) ──
+                # On évite d'écrire sur disque si on ne veut que les métriques
                 masks_output = temp_dir / f"{model.name.replace(' ', '_')}_{video_path.stem}"
-                inference_result = run_inference(model, frames, masks_output)
+                
+                # Si save_masks est False, on ne passe pas de masks_output à run_inference
+                # mais on demande de collecter les masques en RAM pour l'évaluation.
+                inference_result = run_inference(
+                    model, 
+                    video_path, 
+                    masks_output if save_masks else None,
+                    collect_masks=True
+                )
 
                 result_entry.update({
                     "latency_p95_ms": round(inference_result["latency_p95_ms"], 2),
@@ -481,9 +593,14 @@ def run_benchmark(
                     "num_frames": inference_result["num_frames"],
                 })
 
-                # ── Étape 2 : Évaluation ──
+                # ── Étape 2 : Évaluation (RAM ou Disque) ──
                 if gt_masks:
-                    eval_result = run_evaluation(masks_output, gt_masks, frames)
+                    eval_result = run_evaluation(
+                        masks_output if save_masks else None, 
+                        gt_masks, 
+                        video_path,
+                        masks=inference_result.get("masks")
+                    )
                     result_entry.update({
                         "iou_mean": round(eval_result["iou_mean"], 4),
                         "iou_std": round(eval_result["iou_std"], 4),
@@ -505,7 +622,10 @@ def run_benchmark(
                     dest_base = masks_final_dir / model.name.replace(" ", "_") / video_path.stem
                     dest_base.mkdir(parents=True, exist_ok=True)
                     
-                    m_temp = inference_result.get("masks_temp", [])
+                    # Utiliser les masques en RAM si l'écriture disque a été bypassée
+                    m_temp = inference_result.get("masks")
+                    if not m_temp or len(m_temp) == 0:
+                        m_temp = _load_masks(masks_output)
 
                     if save_masks:
                         _save_masks(m_temp, dest_base)
@@ -517,9 +637,10 @@ def run_benchmark(
                         logger.info("🎬 Vidéo masque sauvegardée : %s", video_out_path)
 
                     if save_segmented:
-                        # Sauvegarder la vidéo détourée
+                        # Lire les frames à nouveau pour le détourage
+                        frames_list, _ = _read_video_frames(video_path)
                         seg_video_path = dest_base.parent / f"{video_path.stem}_{model.name.replace(' ', '_')}_segmented.mp4"
-                        _save_segmented_video(m_temp, frames, seg_video_path, fps)
+                        _save_segmented_video(m_temp, frames_list, seg_video_path, fps)
                         logger.info("🎨 Vidéo détourée sauvegardée : %s", seg_video_path)
 
                 # ── Nettoyage des masques temporaires ──

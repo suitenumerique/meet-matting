@@ -12,10 +12,9 @@ Modèle : https://github.com/PaddlePaddle/PaddleSeg/tree/release/2.9/contrib/PP-
 
 import logging
 from pathlib import Path
-from typing import Optional, Tuple
-
 import cv2
 import numpy as np
+from typing import List, Optional, Tuple
 
 from .base import BaseModelWrapper
 
@@ -71,8 +70,26 @@ class PPHumanSegV2Wrapper(BaseModelWrapper):
             selected_providers.append("CUDAExecutionProvider")
         selected_providers.append("CPUExecutionProvider")
 
+        sess_options = ort.SessionOptions()
+        sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+
+        # CoreML specific optimizations if on Mac
+        actual_providers = []
+        for p in selected_providers:
+            if p == "CoreMLExecutionProvider":
+                actual_providers.append(
+                    ("CoreMLExecutionProvider", {
+                        "MLComputeUnits": "ALL",
+                        "convert_model_to_fp16": True  # Enable FP16 inference on Mac
+                    })
+                )
+            else:
+                actual_providers.append(p)
+
         self._session = ort.InferenceSession(
-            str(self._model_path), providers=selected_providers
+            str(self._model_path), 
+            providers=actual_providers,
+            sess_options=sess_options
         )
         self._input_name = self._session.get_inputs()[0].name
         logger.info("PP-HumanSeg V2: modèle ONNX chargé (%s).", self._model_path.name)
@@ -85,50 +102,74 @@ class PPHumanSegV2Wrapper(BaseModelWrapper):
         logger.info("PP-HumanSeg V2: téléchargement terminé.")
 
     def predict(self, frame_bgr: np.ndarray) -> np.ndarray:
-        h_orig, w_orig = frame_bgr.shape[:2]
+        return self.predict_batch([frame_bgr])[0]
+
+    def predict_batch(self, frames_bgr: List[np.ndarray]) -> List[np.ndarray]:
+        if not frames_bgr:
+            return []
+            
+        h_orig, w_orig = frames_bgr[0].shape[:2]
 
         if self._session is None:
-            # Mode placeholder : retourne un masque vide avec un warning
-            logger.warning(
-                "PP-HumanSeg V2: pas de modèle chargé, retour masque vide."
-            )
-            return np.zeros((h_orig, w_orig), dtype=np.float32)
+            logger.warning("PP-HumanSeg V2: pas de modèle chargé, retour masques vides.")
+            return [np.zeros((h_orig, w_orig), dtype=np.float32) for _ in frames_bgr]
 
+        batch_size = len(frames_bgr)
+        
         # Pre-processing
-        frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-        frame_resized = cv2.resize(frame_rgb, (self._INPUT_W, self._INPUT_H))
-
-        # Normalisation PaddleSeg standard
+        tensors = []
         mean = np.array([0.5, 0.5, 0.5], dtype=np.float32)
         std = np.array([0.5, 0.5, 0.5], dtype=np.float32)
-        tensor = (frame_resized.astype(np.float32) / 255.0 - mean) / std
-        tensor = np.transpose(tensor, (2, 0, 1))
-        tensor = np.expand_dims(tensor, axis=0)
+        
+        for frame in frames_bgr:
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            frame_resized = cv2.resize(frame_rgb, (self._INPUT_W, self._INPUT_H))
+            tensor = (frame_resized.astype(np.float32) / 255.0 - mean) / std
+            tensor = np.transpose(tensor, (2, 0, 1))
+            tensors.append(tensor)
+
+        batch_tensor = np.stack(tensors, axis=0)
 
         # Inférence
-        output = self._session.run(None, {self._input_name: tensor})
+        # Note: Certains modèles ONNX (comme celui d'OpenCV Zoo) ont une taille de batch fixe à 1.
+        # On vérifie si on peut passer le batch entier ou si on doit boucler.
+        try:
+            output = self._session.run(None, {self._input_name: batch_tensor})
+            logits_batch = output[0]
+        except Exception as e:
+            if "Got: " in str(e) and "Expected: 1" in str(e):
+                logger.debug("PP-HumanSeg: Batching non supporté par le modèle, repli sur itération.")
+                logits_batch = []
+                for i in range(batch_size):
+                    t = np.expand_dims(batch_tensor[i], axis=0)
+                    out = self._session.run(None, {self._input_name: t})
+                    logits_batch.append(out[0][0])
+                logits_batch = np.array(logits_batch)
+            else:
+                raise e
 
-        # Output shape : (1, 2, H, W) — 2 classes (bg, fg)
-        logits = output[0]
+        masks = []
+        for i in range(batch_size):
+            l = logits_batch[i]
+            if l.ndim == 3 and l.shape[0] >= 2:
+                # Softmax manuel sur un seul item
+                exp_l = np.exp(l - l.max(axis=0, keepdims=True))
+                probs = exp_l / exp_l.sum(axis=0, keepdims=True)
+                mask = probs[1]  # Classe "personne"
+            elif l.ndim == 3 and l.shape[0] == 1:
+                mask = 1.0 / (1.0 + np.exp(-l[0]))
+            else:
+                mask = l.squeeze()
 
-        if logits.ndim == 4 and logits.shape[1] >= 2:
-            # Softmax sur l'axe des classes
-            exp_logits = np.exp(logits - logits.max(axis=1, keepdims=True))
-            probs = exp_logits / exp_logits.sum(axis=1, keepdims=True)
-            mask = probs[0, 1]  # Classe "personne"
-        elif logits.ndim == 4 and logits.shape[1] == 1:
-            mask = 1.0 / (1.0 + np.exp(-logits[0, 0]))  # Sigmoid
-        else:
-            mask = logits.squeeze()
+            # Binarisation pour PP-HumanSeg
+            mask = (mask > 0.5).astype(np.float32)
 
-        # Binarisation pour PP-HumanSeg (modèle de segmentation, pas de matting)
-        # Cela évite d'avoir un fond "assombri" (probabilités résiduelles)
-        mask = (mask > 0.5).astype(np.float32)
+            if mask.shape != (h_orig, w_orig):
+                mask = cv2.resize(mask, (w_orig, h_orig), interpolation=cv2.INTER_LINEAR)
+            
+            masks.append(mask)
 
-        if mask.shape != (h_orig, w_orig):
-            mask = cv2.resize(mask, (w_orig, h_orig), interpolation=cv2.INTER_LINEAR)
-
-        return mask
+        return masks
 
     def get_flops(self, input_shape: Tuple[int, int, int] = (3, 192, 192)) -> float:
         # PP-HumanSeg V2 : ~90 MFLOPs à 192x192
