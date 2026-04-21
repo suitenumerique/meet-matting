@@ -15,7 +15,9 @@ import numpy as np
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from functools import partial
 
-from .config import BOUNDARY_TOLERANCE_PX
+# bound_ratio par défaut (règle DAVIS) : la tolérance de matching de contour
+# est 0.8% de la diagonale de l'image (~2 px à 480p, ~4 px à 1080p).
+DEFAULT_BOUND_RATIO = 0.008
 
 logger = logging.getLogger(__name__)
 
@@ -23,107 +25,119 @@ logger = logging.getLogger(__name__)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  IoU — Intersection over Union
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-def compute_iou(pred: np.ndarray, gt: np.ndarray) -> float:
+def compute_iou(
+    pred_masks: List[np.ndarray],
+    gt_masks: List[np.ndarray],
+    threshold: float = 0.5,
+) -> float:
     """
-    Calcule l'IoU entre un masque prédit et un masque ground truth.
+    Calcule l'IoU global sur toute la séquence vidéo.
 
-    Les deux masques doivent être binaires (0/1) ou seront binarisés
-    avec un seuil de 0.5.
+    Intersection et union sont cumulées sur l'ensemble des pixels de toutes
+    les frames, puis le ratio est calculé une seule fois. C'est un IoU
+    pixel-pondéré : les frames où l'objet est plus grand contribuent
+    davantage au score final.
+
+    Conventions (alignées sur metrics/performance_metrics.py) :
+      - Binarisation avec `threshold` (défaut 0.5, seuil inclusif).
+      - Si l'union est vide sur toute la séquence -> retourne 1.0 (accord
+        parfait par convention : les deux masques sont vides partout).
+      - Si les shapes diffèrent entre pred et GT sur une frame, le masque
+        prédit est redimensionné sur la shape du GT (interpolation NEAREST).
 
     Args:
-        pred: Masque prédit (H, W), valeurs dans [0, 1].
-        gt:   Masque ground truth (H, W), valeurs dans [0, 1].
+        pred_masks: Liste de masques prédits, chacun (H, W) ou (H, W, 1),
+                    valeurs dans [0, 1].
+        gt_masks:   Liste de masques ground truth, chacun (H, W), dans [0, 1].
+        threshold:  Seuil de binarisation.
 
     Returns:
-        Score IoU dans [0, 1]. Retourne 0.0 si l'union est vide.
+        IoU global dans [0, 1].
     """
-    pred_bin = (pred > 0.5).astype(np.uint8)
-    gt_bin = (gt > 0.5).astype(np.uint8)
+    n = min(len(pred_masks), len(gt_masks))
+    if n == 0:
+        return 1.0
 
-    # Resize automatique si dimensions différentes
-    if pred_bin.shape != gt_bin.shape:
-        logger.debug(
-            "IoU: resize pred %s -> gt %s", pred_bin.shape, gt_bin.shape
-        )
-        pred_bin = cv2.resize(
-            pred_bin, (gt_bin.shape[1], gt_bin.shape[0]),
-            interpolation=cv2.INTER_NEAREST,
-        )
+    total_inter = 0
+    total_union = 0
+    for i in range(n):
+        pred = np.asarray(pred_masks[i]).squeeze()
+        gt = np.asarray(gt_masks[i]).squeeze()
 
-    intersection = np.logical_and(pred_bin, gt_bin).sum()
-    union = np.logical_or(pred_bin, gt_bin).sum()
+        pred_bin = (pred >= threshold).astype(np.uint8)
+        gt_bin = (gt >= threshold).astype(np.uint8)
 
-    if union == 0:
-        return 0.0
+        if pred_bin.shape != gt_bin.shape:
+            logger.debug(
+                "IoU: resize pred %s -> gt %s", pred_bin.shape, gt_bin.shape
+            )
+            pred_bin = cv2.resize(
+                pred_bin, (gt_bin.shape[1], gt_bin.shape[0]),
+                interpolation=cv2.INTER_NEAREST,
+            )
 
-    return float(intersection / union)
+        total_inter += int(np.logical_and(pred_bin, gt_bin).sum())
+        total_union += int(np.logical_or(pred_bin, gt_bin).sum())
+
+    if total_union == 0:
+        return 1.0
+
+    return float(total_inter / total_union)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Boundary F-measure
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-def _extract_boundary(mask: np.ndarray) -> np.ndarray:
-    """Extrait les pixels de contour d'un masque binaire via Canny."""
-    mask_u8 = (mask * 255).astype(np.uint8)
-    edges = cv2.Canny(mask_u8, 50, 150)
-    return (edges > 0).astype(np.uint8)
-
-
-def _boundary_precision_recall(
-    pred_boundary: np.ndarray,
-    gt_boundary: np.ndarray,
-    tolerance_px: int = BOUNDARY_TOLERANCE_PX,
-) -> Tuple[float, float]:
+def _extract_boundary(mask_bin: np.ndarray) -> np.ndarray:
     """
-    Calcule Precision et Recall entre contours pred et GT
-    avec une tolérance spatiale (dilatation morphologique).
+    Extrait un contour 1-pixel par soustraction morphologique :
+        boundary = mask - erode(mask)
+
+    Noyau croix 3x3 (4-voisinage). Contrairement à Canny, cette méthode
+    capture aussi les bords des trous internes du masque, ce qui les
+    pénalise dans le F-measure — comportement standard DAVIS, pertinent
+    pour le matting (les trous produisent des artefacts visibles).
     """
-    kernel = cv2.getStructuringElement(
-        cv2.MORPH_ELLIPSE, (2 * tolerance_px + 1, 2 * tolerance_px + 1)
-    )
-
-    # Dilater GT pour calculer la précision (pred hits dans zone GT)
-    gt_dilated = cv2.dilate(gt_boundary, kernel)
-    # Dilater pred pour calculer le recall (GT hits dans zone pred)
-    pred_dilated = cv2.dilate(pred_boundary, kernel)
-
-    pred_count = pred_boundary.sum()
-    gt_count = gt_boundary.sum()
-
-    if pred_count == 0 and gt_count == 0:
-        return 1.0, 1.0
-    if pred_count == 0:
-        return 0.0, 0.0
-    if gt_count == 0:
-        return 0.0, 0.0
-
-    precision = float(np.logical_and(pred_boundary, gt_dilated).sum() / pred_count)
-    recall = float(np.logical_and(gt_boundary, pred_dilated).sum() / gt_count)
-
-    return precision, recall
+    mask_u8 = mask_bin.astype(np.uint8)
+    kernel = cv2.getStructuringElement(cv2.MORPH_CROSS, (3, 3))
+    eroded = cv2.erode(mask_u8, kernel, iterations=1)
+    return mask_u8 - eroded
 
 
 def compute_boundary_f_measure(
     pred: np.ndarray,
     gt: np.ndarray,
-    tolerance_px: int = BOUNDARY_TOLERANCE_PX,
+    bound_ratio: float = DEFAULT_BOUND_RATIO,
+    threshold: float = 0.5,
 ) -> float:
     """
-    Calcule le Boundary F-measure (F1 sur les contours).
+    Boundary F-measure binaire d'une frame (Perazzi et al. 2016, DAVIS).
 
-    Mesure la qualité de la segmentation sur les bords — métrique critique
-    pour le matting vidéo où la qualité des cheveux/doigts est essentielle.
+    Méthode alignée sur metrics/performance_metrics.py :
+      - Extraction du contour par érosion morphologique (trous internes
+        pénalisés — règle DAVIS, souhaitable pour le matting).
+      - Tolérance spatiale adaptée à la résolution :
+            bound_radius = max(1, round(bound_ratio * sqrt(H^2 + W^2)))
+        Avec bound_ratio=0.008 (DAVIS), cela donne ~2 px à 480p, ~4 px à
+        1080p. Un pixel prédit est "matché" s'il tombe dans le contour GT
+        dilaté par un disque de rayon bound_radius (approx morphologique
+        du matching bipartite de Martin et al. 2004).
 
     Args:
-        pred: Masque prédit (H, W), valeurs dans [0, 1].
-        gt:   Masque ground truth (H, W), valeurs dans [0, 1].
-        tolerance_px: Tolérance en pixels pour le matching de contours.
+        pred:        Masque prédit (H, W) ou (H, W, 1), valeurs dans [0, 1].
+        gt:          Masque ground truth (H, W), valeurs dans [0, 1].
+        bound_ratio: Fraction de la diagonale utilisée comme rayon de
+                     tolérance. Défaut 0.008 (règle DAVIS).
+        threshold:   Seuil de binarisation (inclusif).
 
     Returns:
         Score F1 des contours dans [0, 1].
     """
-    pred_bin = (pred > 0.5).astype(np.uint8)
-    gt_bin = (gt > 0.5).astype(np.uint8)
+    pred = np.asarray(pred).squeeze()
+    gt = np.asarray(gt).squeeze()
+
+    pred_bin = (pred >= threshold).astype(np.uint8)
+    gt_bin = (gt >= threshold).astype(np.uint8)
 
     if pred_bin.shape != gt_bin.shape:
         logger.debug(
@@ -137,15 +151,38 @@ def compute_boundary_f_measure(
     pred_boundary = _extract_boundary(pred_bin)
     gt_boundary = _extract_boundary(gt_bin)
 
-    precision, recall = _boundary_precision_recall(
-        pred_boundary, gt_boundary, tolerance_px
-    )
+    n_pred = int(pred_boundary.sum())
+    n_gt = int(gt_boundary.sum())
+
+    # Cas limites : aucun contour d'un côté
+    if n_pred == 0 and n_gt == 0:
+        return 1.0  # accord : pas d'objet nulle part
+    if n_pred == 0 or n_gt == 0:
+        return 0.0  # un seul contour existe -> pas de matching possible
+
+    # Rayon de tolérance en pixels (règle DAVIS : % de la diagonale)
+    h, w = gt_bin.shape[:2]
+    diag = np.sqrt(h ** 2 + w ** 2)
+    bound_radius = max(1, int(np.round(bound_ratio * diag)))
+    ksize = 2 * bound_radius + 1
+    disk = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ksize, ksize))
+
+    # Matching morphologique : un pixel prédit est matché s'il tombe dans
+    # le contour GT dilaté (numérateur de la précision). Symétriquement
+    # pour le recall. Les deux comptes diffèrent quand les contours ont
+    # des densités différentes.
+    pred_dil = cv2.dilate(pred_boundary, disk)
+    gt_dil = cv2.dilate(gt_boundary, disk)
+    matched_pred = int(np.logical_and(pred_boundary, gt_dil).sum())
+    matched_gt = int(np.logical_and(gt_boundary, pred_dil).sum())
+
+    precision = matched_pred / n_pred
+    recall = matched_gt / n_gt
 
     if precision + recall == 0:
         return 0.0
 
-    f_measure = 2.0 * precision * recall / (precision + recall)
-    return float(f_measure)
+    return float(2.0 * precision * recall / (precision + recall))
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -275,12 +312,10 @@ def compute_flow_warping_error(
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Agrégation par vidéo
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-def _compute_single_frame_metrics(pair):
-    """Fonction helper pour le multiprocessing."""
+def _compute_single_frame_bf(pair):
+    """Calcul Boundary F-measure pour une frame (helper multiprocessing)."""
     pred, gt = pair
-    iou = compute_iou(pred, gt)
-    bf = compute_boundary_f_measure(pred, gt)
-    return iou, bf
+    return compute_boundary_f_measure(pred, gt)
 
 
 def compute_all_metrics(
@@ -289,7 +324,12 @@ def compute_all_metrics(
     frames: Optional[Iterable[np.ndarray]] = None,
 ) -> dict:
     """
-    Calcule toutes les métriques de qualité sur une séquence vidéo en parallèle.
+    Calcule toutes les métriques de qualité sur une séquence vidéo.
+
+    IoU : calculé globalement sur la séquence (pixel-weighted, un seul
+    ratio pour toute la vidéo). `iou_std` est exposé à 0.0 — la métrique
+    n'a plus de dispersion par frame. La clé est conservée pour
+    compatibilité avec les rapports en aval.
     """
     n = min(len(pred_masks), len(gt_masks))
     if n == 0:
@@ -302,20 +342,13 @@ def compute_all_metrics(
             "flow_warping_error": 0.0,
         }
 
-    # Parallélisation du calcul IoU et Boundary F (CPU bound)
+    # IoU global sur toute la séquence (un seul ratio agrégé)
+    iou_global = compute_iou(pred_masks[:n], gt_masks[:n])
+
+    # Boundary F par frame (parallélisé — ThreadPool, OpenCV libère le GIL)
     pairs = list(zip(pred_masks[:n], gt_masks[:n]))
-    
-    ious = []
-    boundary_fs = []
-    
-    # On utilise un ThreadPool pour éviter les erreurs de pickling avec Streamlit/Multiprocessing
-    # OpenCV libère le GIL, donc le parallélisme est réel.
     with ThreadPoolExecutor(max_workers=8) as executor:
-        results = list(executor.map(_compute_single_frame_metrics, pairs))
-        
-    for iou, bf in results:
-        ious.append(iou)
-        boundary_fs.append(bf)
+        boundary_fs = list(executor.map(_compute_single_frame_bf, pairs))
 
     # Flow warping error sur les prédictions
     fwe = compute_flow_warping_error(
@@ -324,8 +357,8 @@ def compute_all_metrics(
     )
 
     return {
-        "iou_mean": float(np.mean(ious)),
-        "iou_std": float(np.std(ious)),
+        "iou_mean": iou_global,
+        "iou_std": 0.0,
         "boundary_f_mean": float(np.mean(boundary_fs)),
         "boundary_f_std": float(np.std(boundary_fs)),
         "flow_warping_error": fwe,
