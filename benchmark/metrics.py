@@ -188,125 +188,174 @@ def compute_boundary_f_measure(
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Flow Warping Error — Stabilité temporelle
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Seuil par défaut d'erreur photométrique L1 (sur RGB normalisé [0, 1])
+# au-delà duquel un pixel est considéré invalide (désocclusion / échec du
+# flux optique) et exclu de l'agrégation Lai et al. 2018.
+DEFAULT_PHOTO_THRESHOLD = 0.05
+
+# Paramètres Farneback (mêmes valeurs que metrics/performance_metrics.py)
+_FARNEBACK_PARAMS = dict(
+    pyr_scale=0.5, levels=3, winsize=15, iterations=3,
+    poly_n=5, poly_sigma=1.2, flags=0,
+)
+
+
+def _warp_with_flow(image: np.ndarray, flow: np.ndarray) -> np.ndarray:
+    """
+    Backward-warp `image` avec `flow` :
+        warped[y, x] = image[y + flow_y(y, x), x + flow_x(y, x)]
+
+    Usage typique : image = frame_{t-1} et flow = F_{t -> t-1} (flux backward) ;
+    `warped` est alors une estimation de frame t construite en tirant les
+    pixels de frame_{t-1} le long du flux. Les lookups hors-image sont mis à 0.
+    """
+    h, w = image.shape[:2]
+    grid_y, grid_x = np.mgrid[0:h, 0:w].astype(np.float32)
+    map_x = grid_x + flow[..., 0]
+    map_y = grid_y + flow[..., 1]
+    return cv2.remap(
+        image, map_x, map_y,
+        interpolation=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=0,
+    )
+
+
+def _lai_validity_mask(
+    frame_prev: np.ndarray,
+    frame_curr: np.ndarray,
+    flow_fwd: np.ndarray,
+    flow_bwd: np.ndarray,
+    photo_threshold: float,
+) -> np.ndarray:
+    """
+    Masque de validité (H, W) dans {0, 1}. Un pixel est marqué valide ssi :
+      1) cohérence forward/backward du flux (Sundaram et al. 2010) : aller
+         t -> t-1 via flow_bwd puis revenir via flow_fwd retombe au point
+         de départ à un seuil adaptatif près ;
+      2) cohérence photométrique (Lai et al. 2018) : warper frame_{t-1}
+         vers frame t reproduit la couleur observée avec une erreur L1
+         inférieure à `photo_threshold`.
+    Les pixels qui échouent l'un ou l'autre test correspondent typiquement
+    aux désocclusions ou aux failures du flux et sont exclus du score.
+    """
+    # (1) Cohérence forward/backward
+    flow_fwd_at_t = _warp_with_flow(flow_fwd, flow_bwd)
+    diff = flow_fwd_at_t + flow_bwd  # ≈ 0 si les flux sont cohérents
+    diff_sq = (diff ** 2).sum(axis=-1)
+    mag_sq = (flow_fwd_at_t ** 2).sum(axis=-1) + (flow_bwd ** 2).sum(axis=-1)
+    # Seuil adaptatif (Sundaram) : 1% de la norme au carré + un plancher de
+    # 0.5 pour ne pas rejeter à tort les pixels quasi-statiques.
+    fb_ok = diff_sq <= 0.01 * mag_sq + 0.5
+
+    # (2) Cohérence photométrique
+    frame_prev_warped = _warp_with_flow(frame_prev, flow_bwd)
+    photo_err = np.abs(frame_curr - frame_prev_warped).mean(axis=-1)
+    photo_ok = photo_err <= photo_threshold
+
+    return (fb_ok & photo_ok).astype(np.float32)
+
+
 def compute_flow_warping_error(
     masks: List[np.ndarray],
     frames: Optional[Iterable[np.ndarray]] = None,
+    threshold: float = 0.5,
+    photo_threshold: float = DEFAULT_PHOTO_THRESHOLD,
 ) -> float:
     """
-    Calcule le Flow Warping Error moyen sur une séquence de masques.
+    Flow Warping Error (Lai et al. 2018) via Farneback, pleine résolution.
 
-    Mesure la cohérence temporelle : warp le masque t vers t+1 via le flux
-    optique, puis mesure l'erreur entre le masque warpé et le masque réel t+1.
+    Pour chaque paire (t-1, t) :
+      - Estime les flux forward F_{t-1 -> t} et backward F_{t -> t-1}
+        au niveau Farneback.
+      - Warpe le masque t-1 dans le référentiel de t via le flux backward.
+      - Calcule l'erreur L1 avec le masque t, pondérée par un masque de
+        validité (cohérence fwd/bwd + photométrique).
+    L'erreur finale est une moyenne globale pondérée par le nombre de
+    pixels valides sur toute la séquence — et non une moyenne par frame.
+
+    Note : la boucle fusionne le calcul du flux et l'agrégation pour éviter
+    de stocker tous les flux simultanément en mémoire.
 
     Args:
-        masks: Liste de masques (H, W) en float [0, 1], ordonnés temporellement.
-        frames: Itérable de frames RGB (H, W, 3) correspondantes pour le calcul
-                du flux optique. Si None, utilise les masques eux-mêmes.
+        masks:           Liste de masques (H, W) ou (H, W, 1) dans [0, 1],
+                         ordonnés temporellement.
+        frames:          Itérable de frames BGR (convention OpenCV), (H, W, 3)
+                         ou (H, W, 4). Requis : sans frames l'erreur n'est
+                         pas calculable de façon sensée -> 0.0 + warning.
+        threshold:       Seuil de binarisation des masques (inclusif).
+        photo_threshold: Erreur L1 max (RGB normalisé) pour qu'un pixel soit
+                         considéré valide. Défaut 0.05.
 
     Returns:
-        Erreur moyenne de warping dans [0, 1]. Plus bas = meilleure stabilité.
+        Erreur moyenne pondérée dans [0, 1]. Plus bas = meilleure stabilité.
     """
+    if frames is None:
+        logger.warning(
+            "FWE : aucune frame RGB fournie — la métrique requiert les frames "
+            "source pour la cohérence photométrique. Retour 0.0."
+        )
+        return 0.0
+
     if len(masks) < 2:
         return 0.0
 
-    errors = []
-    
-    # Préparer l'itérateur de frames si fourni
-    frame_it = iter(frames) if frames is not None else None
-    frame_curr = next(frame_it, None) if frame_it else None
+    # --- Matérialiser les frames et les convertir BGR -> RGB float32 [0, 1] ---
+    frame_list = list(frames)
+    t_max = min(len(masks), len(frame_list))
+    if t_max < 2:
+        return 0.0
 
-    for i in range(len(masks) - 1):
-        mask_curr = masks[i].astype(np.float32)
-        mask_next = masks[i + 1].astype(np.float32)
+    video_list: List[np.ndarray] = []
+    for bgr in frame_list[:t_max]:
+        if bgr.ndim == 3 and bgr.shape[2] == 4:
+            bgr = cv2.cvtColor(bgr, cv2.COLOR_BGRA2BGR)
+        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+        video_list.append(rgb)
+    video = np.stack(video_list, axis=0).astype(np.float32) / 255.0  # (T, H, W, 3)
+    t_max, h, w = video.shape[:3]
 
-        # Resize si nécessaire
-        if mask_curr.shape != mask_next.shape:
-            mask_curr = cv2.resize(
-                mask_curr, (mask_next.shape[1], mask_next.shape[0]),
-                interpolation=cv2.INTER_LINEAR,
-            )
-        
-        frame_next = next(frame_it, None) if frame_it else None
-        
-        if frame_curr is not None and frame_next is not None:
-            if len(frame_curr.shape) == 3:
-                if frame_curr.shape[2] == 3:
-                    gray_curr = cv2.cvtColor(frame_curr, cv2.COLOR_BGR2GRAY)
-                elif frame_curr.shape[2] == 4:
-                    gray_curr = cv2.cvtColor(frame_curr, cv2.COLOR_BGRA2GRAY)
-                else:
-                    gray_curr = frame_curr[:, :, 0]
-            else:
-                gray_curr = frame_curr
+    # --- Binariser + aligner les masques sur (h, w) ---
+    mask_stack: List[np.ndarray] = []
+    for m in masks[:t_max]:
+        m_sq = np.asarray(m).squeeze().astype(np.float32)
+        if m_sq.max() > 1.0:
+            m_sq /= 255.0
+        m_bin = (m_sq >= threshold).astype(np.float32)
+        if m_bin.shape != (h, w):
+            m_bin = cv2.resize(m_bin, (w, h), interpolation=cv2.INTER_NEAREST).astype(np.float32)
+        mask_stack.append(m_bin)
+    masks_arr = np.stack(mask_stack, axis=0)  # (T, H, W)
 
-            if len(frame_next.shape) == 3:
-                if frame_next.shape[2] == 3:
-                    gray_next = cv2.cvtColor(frame_next, cv2.COLOR_BGR2GRAY)
-                elif frame_next.shape[2] == 4:
-                    gray_next = cv2.cvtColor(frame_next, cv2.COLOR_BGRA2GRAY)
-                else:
-                    gray_next = frame_next[:, :, 0]
-            else:
-                gray_next = frame_next
-        else:
-            # Utiliser les masques comme référence de flux
-            gray_curr = (mask_curr.squeeze() * 255).astype(np.uint8)
-            gray_next = (mask_next.squeeze() * 255).astype(np.uint8)
+    # --- Niveaux de gris pour Farneback ---
+    gray = np.stack([
+        cv2.cvtColor((f * 255).astype(np.uint8), cv2.COLOR_RGB2GRAY)
+        for f in video
+    ])  # (T, H, W) uint8
 
-        # ── Optimisation Performance : Downsample pour le flux optique ──
-        # La stabilité temporelle peut être évaluée avec précision en basse résolution.
-        target_w = 480
-        h_orig, w_orig = gray_curr.shape[:2]
-        if w_orig > target_w:
-            scale = target_w / w_orig
-            target_h = int(h_orig * scale)
-            g_curr_small = cv2.resize(gray_curr, (target_w, target_h), interpolation=cv2.INTER_AREA)
-            g_next_small = cv2.resize(gray_next, (target_w, target_h), interpolation=cv2.INTER_AREA)
-            m_curr_small = cv2.resize(mask_curr, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
-            m_next_small = cv2.resize(mask_next, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
-        else:
-            g_curr_small, g_next_small = gray_curr, gray_next
-            m_curr_small, m_next_small = mask_curr, mask_next
-
-        # Calcul du flux optique dense (DIS) sur résolution réduite — Beaucoup plus rapide que Farneback
-        if hasattr(cv2, 'DISOpticalFlow_create'):
-            dis = cv2.DISOpticalFlow_create(cv2.DISOPTICAL_FLOW_PRESET_FAST)
-            flow = dis.calc(g_curr_small, g_next_small, None)
-        else:
-            # Fallback Farneback si DIS absent
-            flow = cv2.calcOpticalFlowFarneback(
-                g_curr_small, g_next_small,
-                None,
-                pyr_scale=0.5,
-                levels=2,
-                winsize=11,
-                iterations=2,
-                poly_n=5,
-                poly_sigma=1.1,
-                flags=0,
-            )
-
-        # Warping du masque courant vers le frame suivant
-        h_s, w_s = m_curr_small.shape[:2]
-        flow_map_x = np.arange(w_s, dtype=np.float32)[np.newaxis, :] + flow[..., 0]
-        flow_map_y = np.arange(h_s, dtype=np.float32)[:, np.newaxis] + flow[..., 1]
-    
-        warped_mask = cv2.remap(
-            m_curr_small,
-            flow_map_x,
-            flow_map_y,
-            interpolation=cv2.INTER_LINEAR,
-            borderMode=cv2.BORDER_REPLICATE,
+    # --- Boucle principale : flux bidirectionnel + agrégation streaming ---
+    total_err = 0.0
+    total_valid = 0.0
+    for t in range(1, t_max):
+        flow_fwd = cv2.calcOpticalFlowFarneback(
+            gray[t - 1], gray[t], None, **_FARNEBACK_PARAMS,
+        )
+        flow_bwd = cv2.calcOpticalFlowFarneback(
+            gray[t], gray[t - 1], None, **_FARNEBACK_PARAMS,
         )
 
-        # Erreur L1 entre masque warpé et masque réel (sur résolution réduite)
-        error = np.abs(warped_mask - m_next_small).mean()
-        errors.append(error)
-        
-        # Le frame "next" devient le "curr" pour la prochaine itération
-        frame_curr = frame_next
+        validity = _lai_validity_mask(
+            video[t - 1], video[t], flow_fwd, flow_bwd, photo_threshold,
+        )
+        mask_prev_warped = _warp_with_flow(masks_arr[t - 1], flow_bwd)
+        err = np.abs(masks_arr[t] - mask_prev_warped)
 
-    return float(np.mean(errors))
+        total_err += float((validity * err).sum())
+        total_valid += float(validity.sum())
+
+    if total_valid <= 0:
+        return 0.0
+    return float(total_err / total_valid)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
