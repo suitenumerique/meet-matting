@@ -13,36 +13,46 @@ The two families are orthogonal: a good production model has to score well on bo
 
 ## 1. Compute-cost metrics
 
-### 1.1 FLOPs per frame — `compute_model_gflops_per_frame` - Smaller = Better
+### 1.1 FLOPs per frame — `model.get_flops()` - Smaller = Better
 
-**What it measures.** The number of floating-point operations required for one forward pass of the model, for an input frame of a given size (default: 720p RGB). This is an **intrinsic** property of the computation graph: it depends neither on the hardware (CPU, GPU, NPU), nor on the runtime, nor on the kernel implementations.
+**What it measures.** The number of floating-point operations required for one forward pass of the model, for an input frame at the video's native resolution. This is an **intrinsic** property of the model: it depends neither on the hardware (CPU, GPU, NPU), nor on the runtime, nor on the kernel implementations.
 
 **What it's for.** Ranking models by theoretical complexity and comparing against numbers reported in the literature. Useful to quickly discard models that are too large before even benchmarking them, and to check whether a model fits the compute budget of a target device.
 
-**How it's computed.** The model is first converted to ONNX to guarantee a measurement that is comparable across frameworks (PyTorch, TensorFlow, etc.). The `onnx_tool` library performs shape inference and then profiles the graph node by node, counting MACs (Multiply-Accumulate operations). We return `2 × sum(MACs)`, following the standard vision convention used by MobileNet, EfficientNet, and others. Careful: some libraries (e.g. `thop`) call "FLOPs" what is actually MACs, hence the factor-of-2 discrepancies between sources.
+**How it's computed.** Each model wrapper exposes a `get_flops(input_shape)` method. Two strategies are used depending on the framework:
 
-**Limitations.** FLOPs do not predict real latency: two models with the same FLOP count can have very different latencies depending on parallelizability, memory access patterns, and the kernels available on the target platform. This metric should therefore always be paired with a latency measurement.
+- **Precomputed estimates with linear scaling** (RVM, MODNet, EfficientViT, PP-HumanSeg, MediaPipe): a baseline FLOP count is taken from the model's publication or official documentation at a reference resolution, and scaled linearly with the pixel count `(H × W)` to match the actual inference resolution. Example: RVM with MobileNetV3 reports ~600 MFLOPs at 256×256, which is scaled proportionally for any other resolution.
+- **Dynamic counting via `fvcore`** (MobileNetV3 + LRASPP): the PyTorch graph is traced with `fvcore.nn.FlopCountAnalysis`, which walks each layer and computes the exact MACs.
+- **Not applicable** (GrabCut / Trimap Matting): classical algorithms without a DNN graph — `get_flops()` returns `-1` to signal N/A.
+
+**Limitations.** FLOPs do not predict real latency: two models with the same FLOP count can have very different latencies depending on parallelizability, memory access patterns, and the kernels available on the target platform. This metric should therefore always be paired with a latency measurement. Additionally, the linear-scaling approximation is inexact — the deeper layers of a convolutional network don't all scale the same way with resolution — so absolute numbers for scaled estimates should be read as orders of magnitude, not as precise measurements. For publication-grade numbers, an ONNX + `onnx_tool` pipeline (see `compute_model_gflops_per_frame` in `compute_metrics.py`) is available but not wired into the main benchmark.
 
 **Reference.** There is no single foundational paper for this metric — it's a reporting convention that has emerged over the years in the vision literature.
 
 ---
 
-### 1.2 CPU p95 latency — `benchmark_model_latency_cpu` - Smaller = Better
+### 1.2 p95 latency — `measure_latency` - Smaller = Better
 
-**What it measures.** The actual inference time of a frame on CPU, reported as percentiles (p50, p95, p99) over several hundred invocations. The **p95 is the primary metric** for model selection: it answers the question "how long does a frame take, in the worst reasonable case?"
+**What it measures.** The actual inference time of a single frame, reported as percentiles (mean, p95) measured in-pipeline on real video frames. The **p95 is the primary metric** for model selection: it answers the question "how long does a frame take, in the worst reasonable case?"
 
 **What it's for.** For a real-time application like video conferencing (30 fps ≈ 33 ms budget per frame), it's not the average that determines perceived smoothness, but the worst case. A model averaging 20 ms but spiking to 80 ms every tenth frame will produce visible stutter. The p95 filters out extreme outliers while still capturing realistic worst cases — it's therefore the indicator to optimize first for a smooth user experience.
 
-**How it's computed.** The model is exported to ONNX and executed via ONNX Runtime (CPUExecutionProvider, all graph optimizations enabled). The measurement follows standard benchmarking methodology:
+**How it's computed.** Latency is measured in a **dedicated second pass**, separate from the main inference pass used to collect masks for quality metrics. This separation is deliberate:
 
-- **Warmup** of 20 iterations to absorb kernel selection, memory allocation, CPU cache warm-up, and thread pool spin-up.
-- **Measurement** of 200 iterations with `time.perf_counter` (monotonic, high-resolution timer).
-- The same input tensors are reused across calls to isolate compute cost from input-generation cost (input values don't affect the graph, only shapes do).
-- **Batch size = 1** to simulate online streaming, consistent with the video conferencing use case. Increasing the batch would measure throughput, not latency.
+- The main inference pass runs in **batch 8** with a prefetcher to maximize throughput and collect all masks.
+- The latency pass runs in **batch 1** on real video frames to faithfully reproduce the streaming deployment condition — one frame in, one mask out.
 
-**Limitations.** Latency depends heavily on the CPU used: it must be benchmarked on a machine representative of the target deployment. The number of threads (`intra_op_num_threads`) should likewise reflect real conditions; in single-thread mode (=1), numbers are reproducible but pessimistic.
+The latency pass proceeds as follows:
 
-**Reference.** Standard ONNX Runtime benchmarking methodology. No academic paper: this is common practice for measuring inference latency in production.
+- Load the first `LATENCY_WARMUP_FRAMES + LATENCY_N_FRAMES` frames of the video into RAM (default: 20 warmup + 50 measured = 70 frames).
+- Reset the model state (important for recurrent models like RVM, which carry hidden states across frames).
+- **Warmup** of 20 frames to absorb kernel selection, memory allocation, CPU/GPU cache warm-up, and thread pool spin-up. The recurrent state is maintained between warmup and measurement to preserve the steady-state regime.
+- **Measurement** of 50 frames with `time.perf_counter` (monotonic, high-resolution timer), chronometered one frame at a time via `model.predict_batch([frame])`.
+- The latencies are aggregated into mean, standard deviation, and p95.
+
+**Limitations.** Latency depends heavily on the hardware used (CPU / GPU / MPS on Apple Silicon): it must be benchmarked on a machine representative of the target deployment. Unlike a pure synthetic benchmark, the numbers here also include the Python call overhead around `predict_batch`, which is slightly pessimistic but realistic for a production pipeline. The sample size (50 measurements) is smaller than a dedicated benchmark (200+ is typical), so p99 is not reported — p95 remains stable in this regime.
+
+**Reference.** Standard benchmarking methodology adapted to in-pipeline measurement: the warmup-then-measure pattern is universal; batch size = 1 is the streaming-latency convention. No academic paper — common practice for measuring inference latency in production.
 
 ---
 
