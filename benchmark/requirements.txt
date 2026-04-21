@@ -1,0 +1,27 @@
+# ──────────────────────────────────────────────
+#  Dépendances du benchmark de Video Matting
+# ──────────────────────────────────────────────
+
+# Core
+numpy>=1.24.0
+opencv-python>=4.8.0
+tqdm>=4.65.0
+
+# Inférence
+onnxruntime>=1.16.0
+torch>=2.0.0
+torchvision>=0.15.0
+
+# MediaPipe
+mediapipe>=0.10.0
+
+# FLOPs (optionnel, pour mesure précise)
+fvcore>=0.1.5
+
+# Vidéo (Export rapide)
+imageio>=2.30.0
+imageio-ffmpeg>=0.4.0
+
+# Dashboard
+streamlit>=1.25.0
+pandas>=2.0.0

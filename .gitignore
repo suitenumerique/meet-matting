@@ -1,1 +1,37 @@
+# ──────────────────────────────────────────────
+#  Git Ignore - Video Matting Benchmark
+# ──────────────────────────────────────────────
+
+# Venv
 .venv/
+
+# Datasets et Vidéos (Trop lourds pour Git)
+benchmark/dataset/
+benchmark/videos/
+
+# Résultats du Benchmark
+benchmark/output/
+benchmark/results/
+*.mp4
+*.png
+*.csv
+
+# Poids des modèles
+benchmark/weights/*.onnx
+benchmark/weights/*.tflite
+benchmark/weights/*.pb
+!benchmark/weights/.gitkeep
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.env
+.venv
+env/
+venv/
+.pytest_cache/
+
+# macOS
+.DS_Store
