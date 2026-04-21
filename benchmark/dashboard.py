@@ -97,9 +97,14 @@ with col1:
     # Barre d'outils de sélection
     c1, c2, c3 = st.columns([1, 1, 1])
     if c1.button("✅ Tout cocher"):
+        for k in MODEL_REGISTRY.keys():
+            st.session_state[f"cb_{k}"] = True
         st.session_state.selected_models = list(MODEL_REGISTRY.keys())
         st.rerun()
+        
     if c2.button("❌ Tout décocher"):
+        for k in MODEL_REGISTRY.keys():
+            st.session_state[f"cb_{k}"] = False
         st.session_state.selected_models = []
         st.rerun()
 
@@ -214,6 +219,15 @@ if launch_btn:
                 styled_df = styled_df.highlight_min(subset=["latency_p95_ms"], color='#d4edda')
             
             st.dataframe(styled_df, width='stretch')
+            
+            # Bouton de téléchargement CSV
+            csv = df_display.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="📥 Télécharger les résultats (CSV)",
+                data=csv,
+                file_name=f"benchmark_results_{int(time.time())}.csv",
+                mime='text/csv',
+            )
             
             # Métriques moyennes par modèle
             st.subheader("📈 Moyennes par Modèle")
