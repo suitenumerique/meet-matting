@@ -23,11 +23,15 @@ OUTPUT_DIR = BENCHMARK_ROOT / "output"
 # Résolution cible pour les modèles (H, W). None = résolution native.
 DEFAULT_INPUT_SIZE = (256, 256)
 
-# Nombre de frames de warm-up ignorées pour la mesure de latence
+# Nombre de frames de warm-up ignorées pour la mesure de latence (passe principale)
 WARMUP_FRAMES = 5
 
 # Percentile pour la latence
 LATENCY_PERCENTILE = 95
+
+# Passe latence dédiée (batch=1, frames réelles)
+LATENCY_WARMUP_FRAMES = 20   # frames de chauffe, non mesurées
+LATENCY_N_FRAMES = 50        # frames effectivement chronométrées
 
 # Seuil de binarisation des masques (pour les modèles produisant des alpha mattes)
 MASK_THRESHOLD = 0.5

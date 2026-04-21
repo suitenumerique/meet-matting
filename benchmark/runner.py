@@ -26,13 +26,14 @@ import queue
 
 from .config import (
     GROUND_TRUTH_DIR,
+    LATENCY_N_FRAMES,
     LATENCY_PERCENTILE,
+    LATENCY_WARMUP_FRAMES,
     OUTPUT_DIR,
     RESULTS_CSV_FILENAME,
     RESULTS_JSON_FILENAME,
     TEMP_RESULTS_DIR,
     VIDEOS_DIR,
-    WARMUP_FRAMES,
 )
 from .metrics import compute_all_metrics
 from .models.base import BaseModelWrapper
@@ -309,66 +310,114 @@ def run_inference(
 ) -> Dict:
     """
     Exécute l'inférence sur une vidéo en streaming avec prefetching et batching.
+    Collecte les masques pour l'évaluation ; la latence est mesurée séparément
+    par measure_latency() en conditions batch=1.
     """
-    latencies = []
     total_frames = 0
     masks_in_ram = [] if collect_masks else None
-    
+
     num_frames, fps, (w, h) = _get_video_info(video_path)
     input_shape = (3, h, w)
 
     model.reset_state()
     logger.info("Inférence %s sur %s (prefetch actif)…", model.name, video_path.name)
 
-    # Préparer le prefetcher
     prefetcher = VideoPrefetcher(video_path, queue_size=batch_size * 2).start()
 
     with tqdm(total=num_frames, desc=f"  ⚡ {model.name}", unit="frame") as pbar:
         frame_idx = 0
         for batch in _batched(prefetcher, batch_size):
-            t_start = time.perf_counter()
             masks = model.predict_batch(batch)
-            t_end = time.perf_counter()
-            
-            latency_per_frame = ((t_end - t_start) * 1000.0) / len(batch)
-            
+
             for m in masks:
-                if frame_idx >= WARMUP_FRAMES:
-                    latencies.append(latency_per_frame)
                 if collect_masks:
                     masks_in_ram.append(m)
                 frame_idx += 1
 
-            # Sauvegarde disque uniquement si nécessaire (IO bypass)
             if output_dir:
                 _save_masks(masks, output_dir, start_idx=frame_idx - len(batch))
-            
+
             pbar.update(len(batch))
             total_frames += len(batch)
 
     prefetcher.stop()
 
-    # Calcul des stats
-    latencies_arr = np.array(latencies) if latencies else np.array([0.0])
-    p95 = float(np.percentile(latencies_arr, LATENCY_PERCENTILE))
     flops = model.get_flops(input_shape)
+    logger.info("%s — %d frames traitées | FLOPs: %.2e", model.name, total_frames, flops)
 
-    result = {
-        "latencies_ms": latencies,
-        "latency_p95_ms": p95,
-        "latency_mean_ms": float(latencies_arr.mean()),
-        "latency_std_ms": float(latencies_arr.std()),
+    return {
         "flops_per_frame": flops,
         "num_frames": total_frames,
         "masks": masks_in_ram,
     }
 
+
+def measure_latency(
+    model: BaseModelWrapper,
+    video_path: Path,
+    warmup_frames: int = LATENCY_WARMUP_FRAMES,
+    n_frames: int = LATENCY_N_FRAMES,
+) -> Dict:
+    """
+    Mesure la latence frame-à-frame en conditions réelles (batch=1).
+
+    Charge les (warmup_frames + n_frames) premières frames de la vidéo en RAM,
+    réinitialise l'état du modèle, effectue le warmup sans enregistrer, puis
+    chronomètre chaque appel predict_batch([frame]) individuellement.
+    Le modèle reste en régime établi tout au long (état récurrent préservé),
+    ce qui reflète la latence steady-state d'un pipeline streaming.
+
+    Args:
+        warmup_frames: Nombre de frames de chauffe (non mesurées).
+        n_frames:      Nombre de frames effectivement chronométrées.
+
+    Returns:
+        Dict avec latency_p95_ms, latency_mean_ms, latency_std_ms.
+    """
+    total_needed = warmup_frames + n_frames
+    frames: List[np.ndarray] = []
+    cap = cv2.VideoCapture(str(video_path))
+    while len(frames) < total_needed:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        frames.append(frame)
+    cap.release()
+
+    if len(frames) <= warmup_frames:
+        logger.warning(
+            "measure_latency : vidéo trop courte (%d frames) pour %d warmup + %d mesures.",
+            len(frames), warmup_frames, n_frames,
+        )
+        return {"latency_p95_ms": 0.0, "latency_mean_ms": 0.0, "latency_std_ms": 0.0}
+
+    model.reset_state()
     logger.info(
-        "%s — Latence p95: %.2f ms | Moyenne: %.2f ms | FLOPs: %.2e",
-        model.name, p95, result["latency_mean_ms"], flops,
+        "Latence %s : %d warmup + %d mesures (batch=1)…",
+        model.name, warmup_frames, len(frames) - warmup_frames,
     )
 
-    return result
+    for frame in frames[:warmup_frames]:
+        model.predict_batch([frame])
+
+    latencies: List[float] = []
+    for frame in frames[warmup_frames:]:
+        t0 = time.perf_counter()
+        model.predict_batch([frame])
+        t1 = time.perf_counter()
+        latencies.append((t1 - t0) * 1000.0)
+
+    arr = np.array(latencies)
+    p95 = float(np.percentile(arr, LATENCY_PERCENTILE))
+    logger.info(
+        "%s — Latence p95: %.2f ms | Moyenne: %.2f ms",
+        model.name, p95, arr.mean(),
+    )
+    return {
+        "latency_p95_ms": p95,
+        "latency_mean_ms": float(arr.mean()),
+        "latency_std_ms": float(arr.std()),
+    }
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -579,16 +628,18 @@ def run_benchmark(
                 # Si save_masks est False, on ne passe pas de masks_output à run_inference
                 # mais on demande de collecter les masques en RAM pour l'évaluation.
                 inference_result = run_inference(
-                    model, 
-                    video_path, 
+                    model,
+                    video_path,
                     masks_output if save_masks else None,
-                    collect_masks=True
+                    collect_masks=True,
                 )
 
+                latency_result = measure_latency(model, video_path)
+
                 result_entry.update({
-                    "latency_p95_ms": round(inference_result["latency_p95_ms"], 2),
-                    "latency_mean_ms": round(inference_result["latency_mean_ms"], 2),
-                    "latency_std_ms": round(inference_result["latency_std_ms"], 2),
+                    "latency_p95_ms": round(latency_result["latency_p95_ms"], 2),
+                    "latency_mean_ms": round(latency_result["latency_mean_ms"], 2),
+                    "latency_std_ms": round(latency_result["latency_std_ms"], 2),
                     "flops_per_frame": inference_result["flops_per_frame"],
                     "num_frames": inference_result["num_frames"],
                 })
