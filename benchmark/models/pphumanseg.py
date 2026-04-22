@@ -37,14 +37,28 @@ class PPHumanSegV2Wrapper(BaseModelWrapper):
     _INPUT_W = 192
     _MODEL_URL = "https://github.com/opencv/opencv_zoo/raw/main/models/human_segmentation_pphumanseg/human_segmentation_pphumanseg_2023mar.onnx"
 
-    def __init__(self, model_path: Optional[str] = None):
+    def __init__(
+        self, 
+        model_path: Optional[str] = None,
+        use_refinement: bool = True,
+        refine_radius: int = 8,
+        refine_eps: float = 1e-2
+    ):
         self._model_path = Path(model_path) if model_path else _DEFAULT_MODEL_PATH
         self._session = None
         self._input_name = None
+        
+        # Paramètres de raffinement
+        self._use_refinement = use_refinement
+        self._refine_radius = refine_radius
+        self._refine_eps = refine_eps
 
     @property
     def name(self) -> str:
-        return "PP-HumanSeg V2"
+        name = "PP-HumanSeg V2"
+        if self._use_refinement:
+            name += " (Refined)"
+        return name
 
     @property
     def input_size(self) -> Optional[Tuple[int, int]]:
@@ -116,29 +130,41 @@ class PPHumanSegV2Wrapper(BaseModelWrapper):
 
         batch_size = len(frames_bgr)
         
-        # Pre-processing
+        # Pre-processing avec Letterbox pour préserver l'aspect ratio
         tensors = []
         mean = np.array([0.5, 0.5, 0.5], dtype=np.float32)
         std = np.array([0.5, 0.5, 0.5], dtype=np.float32)
         
+        # Calcul du ratio de redimensionnement et du padding une seule fois (si toutes les frames ont la même taille)
+        scale = min(self._INPUT_W / w_orig, self._INPUT_H / h_orig)
+        nw, nh = int(w_orig * scale), int(h_orig * scale)
+        dx, dy = (self._INPUT_W - nw) // 2, (self._INPUT_H - nh) // 2
+        
         for frame in frames_bgr:
+            # Note: On convertit en RGB car le modèle a été entraîné en RGB
             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            frame_resized = cv2.resize(frame_rgb, (self._INPUT_W, self._INPUT_H))
-            tensor = (frame_resized.astype(np.float32) / 255.0 - mean) / std
+            
+            # Letterbox resize
+            interp = cv2.INTER_AREA if scale < 1 else cv2.INTER_LINEAR
+            frame_resized = cv2.resize(frame_rgb, (nw, nh), interpolation=interp)
+            
+            # Create padded canvas
+            canvas = np.full((self._INPUT_H, self._INPUT_W, 3), 127, dtype=np.uint8) # Gray padding
+            canvas[dy:dy+nh, dx:dx+nw, :] = frame_resized
+            
+            tensor = (canvas.astype(np.float32) / 255.0 - mean) / std
             tensor = np.transpose(tensor, (2, 0, 1))
             tensors.append(tensor)
 
         batch_tensor = np.stack(tensors, axis=0)
 
         # Inférence
-        # Note: Certains modèles ONNX (comme celui d'OpenCV Zoo) ont une taille de batch fixe à 1.
-        # On vérifie si on peut passer le batch entier ou si on doit boucler.
         try:
             output = self._session.run(None, {self._input_name: batch_tensor})
             logits_batch = output[0]
         except Exception as e:
             if "Got: " in str(e) and "Expected: 1" in str(e):
-                logger.debug("PP-HumanSeg: Batching non supporté par le modèle, repli sur itération.")
+                logger.debug("PP-HumanSeg: Batching non supporté, passage en boucle.")
                 logits_batch = []
                 for i in range(batch_size):
                     t = np.expand_dims(batch_tensor[i], axis=0)
@@ -151,25 +177,39 @@ class PPHumanSegV2Wrapper(BaseModelWrapper):
         masks = []
         for i in range(batch_size):
             l = logits_batch[i]
+            # Softmax / Sigmoid selon le format d'output
             if l.ndim == 3 and l.shape[0] >= 2:
-                # Softmax manuel sur un seul item
                 exp_l = np.exp(l - l.max(axis=0, keepdims=True))
                 probs = exp_l / exp_l.sum(axis=0, keepdims=True)
-                mask = probs[1]  # Classe "personne"
+                mask_low_padded = probs[1]
             elif l.ndim == 3 and l.shape[0] == 1:
-                mask = 1.0 / (1.0 + np.exp(-l[0]))
+                mask_low_padded = 1.0 / (1.0 + np.exp(-l[0]))
             else:
-                mask = l.squeeze()
+                mask_low_padded = l.squeeze()
 
-            # Binarisation pour PP-HumanSeg
-            mask = (mask > 0.5).astype(np.float32)
+            # Retirer le padding du masque
+            mask_low = mask_low_padded[dy:dy+nh, dx:dx+nw]
 
-            if mask.shape != (h_orig, w_orig):
-                mask = cv2.resize(mask, (w_orig, h_orig), interpolation=cv2.INTER_LINEAR)
+            # 1. Upsample initial
+            mask_up = cv2.resize(mask_low, (w_orig, h_orig), interpolation=cv2.INTER_LINEAR)
+
+            # 2. Raffinement via Guided Filter (optionnel mais recommandé)
+            if self._use_refinement:
+                guide = frames_bgr[i]
+                mask_up = cv2.ximgproc.guidedFilter(
+                    guide=guide, 
+                    src=mask_up, 
+                    radius=self._refine_radius, 
+                    eps=self._refine_eps
+                )
+
+            # 3. Post-traitement du contraste (Sigmoïde douce)
+            mask = np.clip((mask_up - 0.45) / (0.55 - 0.45), 0.0, 1.0)
             
             masks.append(mask)
 
         return masks
+
 
     def get_flops(self, input_shape: Tuple[int, int, int] = (3, 192, 192)) -> float:
         # PP-HumanSeg V2 : ~90 MFLOPs à 192x192
@@ -181,3 +221,4 @@ class PPHumanSegV2Wrapper(BaseModelWrapper):
     def cleanup(self) -> None:
         self._session = None
         logger.info("PP-HumanSeg V2: session ONNX fermée.")
+

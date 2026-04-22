@@ -14,6 +14,7 @@ import json
 import logging
 import shutil
 import time
+import warnings
 from pathlib import Path
 import cv2
 import numpy as np
@@ -23,6 +24,11 @@ import itertools
 from concurrent.futures import ThreadPoolExecutor
 import threading
 import queue
+
+# Silence Streamlit spam
+logging.getLogger("streamlit").setLevel(logging.ERROR)
+logging.getLogger("streamlit.runtime.scriptrunner_utils.script_run_context").disabled = True
+warnings.filterwarnings("ignore", message="missing ScriptRunContext")
 
 from .config import (
     GROUND_TRUTH_DIR,
@@ -38,6 +44,7 @@ from .metrics import compute_all_metrics
 from .models.base import BaseModelWrapper
 
 logger = logging.getLogger(__name__)
+
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -66,17 +73,9 @@ class VideoPrefetcher:
         self.thread = threading.Thread(target=self._run, daemon=True)
 
     def start(self):
-        # Attacher le contexte Streamlit si on est dans un dashboard pour éviter les warnings
-        try:
-            from streamlit.runtime.scriptrunner import get_script_run_context, add_script_run_context
-            ctx = get_script_run_context()
-            if ctx:
-                add_script_run_context(self.thread)
-        except ImportError:
-            pass
-            
         self.thread.start()
         return self
+
 
     def _run(self):
         cap = cv2.VideoCapture(str(self.video_path))
@@ -144,14 +143,10 @@ def _read_video_frames(video_path: Path) -> Tuple[List[np.ndarray], float]:
 
 def _load_ground_truth_masks(gt_dir: Path, num_frames: int) -> List[np.ndarray]:
     """
-    Charge les masques GT depuis un répertoire.
-
-    Supporte deux formats :
-      - Dossier d'images (PNG/JPG) triées par nom.
-      - Vidéo de masques (chaque frame = masque en niveaux de gris).
-
-    Returns:
-        Liste de masques float32 [0, 1] de longueur min(disponible, num_frames).
+    Charge les masques GT depuis un répertoire ou une vidéo.
+    
+    Si le GT est une vidéo couleur, on applique un traitement de type Chromakey 
+    pour extraire l'humain (tout ce qui n'est ni vert ni noir).
     """
     masks = []
 
@@ -166,18 +161,49 @@ def _load_ground_truth_masks(gt_dir: Path, num_frames: int) -> List[np.ndarray]:
             if img is not None:
                 masks.append(img.astype(np.float32) / 255.0)
     elif gt_dir.is_file():
-        # Mode vidéo de masques
+        # Mode vidéo : On gère le cas des vidéos à fond vert (Green Screen)
         cap = cv2.VideoCapture(str(gt_dir))
         while len(masks) < num_frames:
             ret, frame = cap.read()
             if not ret:
                 break
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if len(frame.shape) == 3 else frame
-            masks.append(gray.astype(np.float32) / 255.0)
+            
+            # Détection automatique : si la saturation moyenne est faible, c'est probablement un masque binaire
+            hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+            avg_saturation = np.mean(hsv[:, :, 1])
+            
+            if avg_saturation > 30: # Seuil arbitraire pour détecter un fond vert
+                # 1. Détection du VERT (Background)
+                lower_green = np.array([35, 40, 40])
+                upper_green = np.array([85, 255, 255])
+                mask_green = cv2.inRange(hsv, lower_green, upper_green)
+                
+                # 2. Détection du NOIR (Logos/Bords sombres en background)
+                lower_black = np.array([0, 0, 0])
+                upper_black = np.array([180, 255, 50]) # V < 50
+                mask_black = cv2.inRange(hsv, lower_black, upper_black)
+                
+                # 3. Le fond est l'union du vert et du noir
+                background_mask = cv2.bitwise_or(mask_green, mask_black)
+                
+                # 4. Le sujet humain est l'inverse du fond
+                human_mask = cv2.bitwise_not(background_mask)
+                
+                # Nettoyage morphologique
+                kernel = np.ones((5, 5), np.uint8)
+                human_mask = cv2.morphologyEx(human_mask, cv2.MORPH_OPEN, kernel)
+                human_mask = cv2.morphologyEx(human_mask, cv2.MORPH_CLOSE, kernel)
+                masks.append(human_mask.astype(np.float32) / 255.0)
+            else:
+                # C'est probablement déjà un masque binaire ou niveaux de gris
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                masks.append(gray.astype(np.float32) / 255.0)
         cap.release()
 
-    logger.info("GT chargé : %d masques depuis %s", len(masks), gt_dir)
+
+    logger.info("GT chargé et traité : %d masques extraits depuis %s", len(masks), gt_dir)
     return masks
+
 
 
 def _save_masks(masks: List[np.ndarray], output_dir: Path, start_idx: int = 0) -> None:
@@ -461,18 +487,23 @@ def discover_datasets(
             pairs.append((video_file, gt_video_avi))
             logger.info("Dataset découvert : %s ↔ %s", video_file.name, gt_video_avi.name)
         else:
-            logger.warning(
+            # C'est souvent normal pour certaines vidéos d'un dataset de ne pas avoir de GT.
+            # On log en DEBUG pour éviter de spammer le terminal lors du discovery UI.
+            logger.debug(
                 "Pas de GT trouvé pour %s (cherché : %s/, %s, %s)",
                 video_file.name, gt_folder, gt_video, gt_video_avi,
             )
 
-    logger.info("Total : %d couples (vidéo, GT) découverts.", len(pairs))
+    logger.debug("Total : %d couples (vidéo, GT) découverts.", len(pairs))
     return pairs
+
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Boucle principale
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+from typing import Dict, Iterable, List, Optional, Tuple, Generator, Callable
+
 def run_benchmark(
     models: List[BaseModelWrapper],
     videos_dir: Path = VIDEOS_DIR,
@@ -484,15 +515,13 @@ def run_benchmark(
     save_masks: bool = False,
     save_video: bool = False,
     save_segmented: bool = False,
+    progress_callback: Optional[Callable[[int, int, str], None]] = None,
 ) -> List[Dict]:
     """
     Exécute le benchmark complet pour tous les modèles sur toutes les vidéos.
 
     Args:
-        random_selection: Si True, sélectionne num_videos vidéos au hasard.
-        save_masks: Si True, stocke les masques binaires (PNG).
-        save_video: Si True, compile les masques binaires en vidéo (MP4).
-        save_segmented: Si True, stocke le sujet sur fond noir (images et vidéo).
+        progress_callback: Fonction appelée à chaque étape (current, total, message).
     """
     import random
 
@@ -525,6 +554,7 @@ def run_benchmark(
 
     all_results = []
     total_combos = len(models) * len(datasets)
+    current_combo = 0
 
     logger.info("=" * 72)
     logger.info(
@@ -533,7 +563,11 @@ def run_benchmark(
     )
     logger.info("=" * 72)
 
+    if progress_callback:
+        progress_callback(0, total_combos, "Démarrage du benchmark...")
+
     for model in models:
+
         logger.info("─" * 72)
         logger.info("Modèle : %s", model.name)
         logger.info("─" * 72)
@@ -654,9 +688,15 @@ def run_benchmark(
                 result_entry["error"] = str(e)
 
             all_results.append(result_entry)
+            
+            # Mise à jour progression
+            current_combo += 1
+            if progress_callback:
+                progress_callback(current_combo, total_combos, f"Traité : {model.name} / {video_path.name}")
 
         # Libérer le modèle
         model.cleanup()
+
 
     # ── Générer les rapports ──
     _save_csv_report(all_results, output_dir)

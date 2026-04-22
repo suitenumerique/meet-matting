@@ -8,7 +8,8 @@ Métriques implémentées :
 """
 
 import logging
-from typing import Iterable, List, Optional, Tuple
+import gc
+from typing import Iterable, List, Optional, Tuple, Generator
 
 import cv2
 import numpy as np
@@ -193,11 +194,18 @@ def compute_boundary_f_measure(
 # flux optique) et exclu de l'agrégation Lai et al. 2018.
 DEFAULT_PHOTO_THRESHOLD = 0.05
 
-# Paramètres Farneback (mêmes valeurs que metrics/performance_metrics.py)
+# Paramètres Farneback
 _FARNEBACK_PARAMS = dict(
     pyr_scale=0.5, levels=3, winsize=15, iterations=3,
     poly_n=5, poly_sigma=1.2, flags=0,
 )
+
+def _compute_flow_pair(pair: Tuple[np.ndarray, np.ndarray]):
+    """Helper pour calculer le flux forward et backward entre deux frames (Gray uint8)."""
+    prev_gray, curr_gray = pair
+    fwd = cv2.calcOpticalFlowFarneback(prev_gray, curr_gray, None, **_FARNEBACK_PARAMS)
+    bwd = cv2.calcOpticalFlowFarneback(curr_gray, prev_gray, None, **_FARNEBACK_PARAMS)
+    return fwd, bwd
 
 
 def _warp_with_flow(image: np.ndarray, flow: np.ndarray) -> np.ndarray:
@@ -261,101 +269,74 @@ def compute_flow_warping_error(
     frames: Optional[Iterable[np.ndarray]] = None,
     threshold: float = 0.5,
     photo_threshold: float = DEFAULT_PHOTO_THRESHOLD,
+    downsample_factor: float = 0.5,
 ) -> float:
     """
-    Flow Warping Error (Lai et al. 2018) via Farneback, pleine résolution.
-
-    Pour chaque paire (t-1, t) :
-      - Estime les flux forward F_{t-1 -> t} et backward F_{t -> t-1}
-        au niveau Farneback.
-      - Warpe le masque t-1 dans le référentiel de t via le flux backward.
-      - Calcule l'erreur L1 avec le masque t, pondérée par un masque de
-        validité (cohérence fwd/bwd + photométrique).
-    L'erreur finale est une moyenne globale pondérée par le nombre de
-    pixels valides sur toute la séquence — et non une moyenne par frame.
-
-    Note : la boucle fusionne le calcul du flux et l'agrégation pour éviter
-    de stocker tous les flux simultanément en mémoire.
-
-    Args:
-        masks:           Liste de masques (H, W) ou (H, W, 1) dans [0, 1],
-                         ordonnés temporellement.
-        frames:          Itérable de frames BGR (convention OpenCV), (H, W, 3)
-                         ou (H, W, 4). Requis : sans frames l'erreur n'est
-                         pas calculable de façon sensée -> 0.0 + warning.
-        threshold:       Seuil de binarisation des masques (inclusif).
-        photo_threshold: Erreur L1 max (RGB normalisé) pour qu'un pixel soit
-                         considéré valide. Défaut 0.05.
-
-    Returns:
-        Erreur moyenne pondérée dans [0, 1]. Plus bas = meilleure stabilité.
+    Calcul du Flow Warping Error optimisé pour la RAM et la vitesse.
+    
+    Évite de charger toute la vidéo en float32. Utilise des images réduites
+    et du calcul parallèle pour maximiser les performances sur CPU.
     """
-    if frames is None:
-        logger.warning(
-            "FWE : aucune frame RGB fournie — la métrique requiert les frames "
-            "source pour la cohérence photométrique. Retour 0.0."
-        )
+    if frames is None or len(masks) < 2:
         return 0.0
 
-    if len(masks) < 2:
-        return 0.0
+    # 1. Préparation des données à basse résolution (Economies de RAM massives)
+    video_low = []   # Frames RGB float32 [0, 1] à échelle réduite
+    masks_low = []   # Masques binaires float32 à échelle réduite
+    grays_low = []   # Frames Grayscale uint8 pour Farneback
+    
+    # On itère pour ne pas tout charger d'un coup avant d'avoir réduit la taille
+    for i, frame in enumerate(frames):
+        if i >= len(masks): break
+        
+        h, w = frame.shape[:2]
+        tw, th = int(w * downsample_factor), int(h * downsample_factor)
+        
+        # Réduction de la frame
+        if frame.ndim == 3 and frame.shape[2] == 4:
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
+        f_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        f_low = cv2.resize(f_rgb, (tw, th), interpolation=cv2.INTER_AREA)
+        
+        video_low.append(f_low.astype(np.float32) / 255.0)
+        grays_low.append(cv2.cvtColor(f_low, cv2.COLOR_RGB2GRAY))
+        
+        # Réduction du masque
+        m = np.asarray(masks[i]).squeeze().astype(np.float32)
+        if m.max() > 1.0: m /= 255.0
+        m_bin = (m >= threshold).astype(np.float32)
+        masks_low.append(cv2.resize(m_bin, (tw, th), interpolation=cv2.INTER_NEAREST))
 
-    # --- Matérialiser les frames et les convertir BGR -> RGB float32 [0, 1] ---
-    frame_list = list(frames)
-    t_max = min(len(masks), len(frame_list))
-    if t_max < 2:
-        return 0.0
+    t_max = len(video_low)
+    if t_max < 2: return 0.0
 
-    video_list: List[np.ndarray] = []
-    for bgr in frame_list[:t_max]:
-        if bgr.ndim == 3 and bgr.shape[2] == 4:
-            bgr = cv2.cvtColor(bgr, cv2.COLOR_BGRA2BGR)
-        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-        video_list.append(rgb)
-    video = np.stack(video_list, axis=0).astype(np.float32) / 255.0  # (T, H, W, 3)
-    t_max, h, w = video.shape[:3]
+    # 2. Calcul du flux en parallèle (on utilise ThreadPool sur Mac pour éviter les erreurs de Pickle/spawn)
+    pairs = [(grays_low[t-1], grays_low[t]) for t in range(1, t_max)]
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        flows = list(executor.map(_compute_flow_pair, pairs))
 
-    # --- Binariser + aligner les masques sur (h, w) ---
-    mask_stack: List[np.ndarray] = []
-    for m in masks[:t_max]:
-        m_sq = np.asarray(m).squeeze().astype(np.float32)
-        if m_sq.max() > 1.0:
-            m_sq /= 255.0
-        m_bin = (m_sq >= threshold).astype(np.float32)
-        if m_bin.shape != (h, w):
-            m_bin = cv2.resize(m_bin, (w, h), interpolation=cv2.INTER_NEAREST).astype(np.float32)
-        mask_stack.append(m_bin)
-    masks_arr = np.stack(mask_stack, axis=0)  # (T, H, W)
 
-    # --- Niveaux de gris pour Farneback ---
-    gray = np.stack([
-        cv2.cvtColor((f * 255).astype(np.uint8), cv2.COLOR_RGB2GRAY)
-        for f in video
-    ])  # (T, H, W) uint8
-
-    # --- Boucle principale : flux bidirectionnel + agrégation streaming ---
+    # 3. Agrégation finale
     total_err = 0.0
     total_valid = 0.0
     for t in range(1, t_max):
-        flow_fwd = cv2.calcOpticalFlowFarneback(
-            gray[t - 1], gray[t], None, **_FARNEBACK_PARAMS,
-        )
-        flow_bwd = cv2.calcOpticalFlowFarneback(
-            gray[t], gray[t - 1], None, **_FARNEBACK_PARAMS,
-        )
-
+        # Récupération des flux calculés en parallèle
+        flow_fwd, flow_bwd = flows[t-1]
+        
         validity = _lai_validity_mask(
-            video[t - 1], video[t], flow_fwd, flow_bwd, photo_threshold,
+            video_low[t-1], video_low[t], flow_fwd, flow_bwd, photo_threshold
         )
-        mask_prev_warped = _warp_with_flow(masks_arr[t - 1], flow_bwd)
-        err = np.abs(masks_arr[t] - mask_prev_warped)
+        mask_prev_warped = _warp_with_flow(masks_low[t-1], flow_bwd)
+        err = np.abs(masks_low[t] - mask_prev_warped)
 
         total_err += float((validity * err).sum())
         total_valid += float(validity.sum())
 
-    if total_valid <= 0:
-        return 0.0
-    return float(total_err / total_valid)
+    # Nettoyage explicite de la mémoire
+    del video_low, grays_low, masks_low, flows
+    gc.collect()
+
+    return float(total_err / total_valid) if total_valid > 0 else 0.0
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -371,14 +352,10 @@ def compute_all_metrics(
     pred_masks: List[np.ndarray],
     gt_masks: List[np.ndarray],
     frames: Optional[Iterable[np.ndarray]] = None,
+    downsample_factor: float = 0.5,
 ) -> dict:
     """
     Calcule toutes les métriques de qualité sur une séquence vidéo.
-
-    IoU : calculé globalement sur la séquence (pixel-weighted, un seul
-    ratio pour toute la vidéo). `iou_std` est exposé à 0.0 — la métrique
-    n'a plus de dispersion par frame. La clé est conservée pour
-    compatibilité avec les rapports en aval.
     """
     n = min(len(pred_masks), len(gt_masks))
     if n == 0:
@@ -391,18 +368,19 @@ def compute_all_metrics(
             "flow_warping_error": 0.0,
         }
 
-    # IoU global sur toute la séquence (un seul ratio agrégé)
+    # 1. IoU global sur toute la séquence
     iou_global = compute_iou(pred_masks[:n], gt_masks[:n])
 
-    # Boundary F par frame (parallélisé — ThreadPool, OpenCV libère le GIL)
+    # 2. Boundary F par frame (ThreadPool car OpenCV libère le GIL)
     pairs = list(zip(pred_masks[:n], gt_masks[:n]))
     with ThreadPoolExecutor(max_workers=8) as executor:
         boundary_fs = list(executor.map(_compute_single_frame_bf, pairs))
 
-    # Flow warping error sur les prédictions
+    # 3. Flow warping error avec optimisation RAM
     fwe = compute_flow_warping_error(
         pred_masks[:n],
         frames,
+        downsample_factor=downsample_factor
     )
 
     return {

@@ -12,20 +12,24 @@ import streamlit as st
 import pandas as pd
 import sys
 import os
+import warnings
 from pathlib import Path
 import time
 import logging
 
-# Silence Streamlit context warnings that spam the console during parallel processing
-logging.getLogger("streamlit.runtime.scriptrunner_utils.script_run_context").setLevel(logging.ERROR)
-logging.getLogger("streamlit.runtime.state.session_state_proxy").setLevel(logging.ERROR)
+# Silence Streamlit context warnings handled in benchmark/__init__.py
+
 
 # Ajouter le parent au path pour importer les modules benchmark
 sys.path.append(str(Path(__file__).parent.parent))
 
+# Silence MediaPipe / TF logs
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
+os.environ["GLOG_minloglevel"] = "3"
+
 from benchmark.models import MODEL_REGISTRY
 from benchmark.runner import run_benchmark, discover_datasets
-from benchmark.config import VIDEOS_DIR, GROUND_TRUTH_DIR, OUTPUT_DIR, TEMP_RESULTS_DIR
+from benchmark.config import VIDEOS_DIR, GROUND_TRUTH_DIR, OUTPUT_DIR, TEMP_RESULTS_DIR, DATASETS
 
 # Configuration de la page
 st.set_page_config(
@@ -59,10 +63,22 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ── Sidebar : Configuration ──
-st.sidebar.title("⚙️ Configuration")
+st.sidebar.subheader("Dataset")
+selected_ds_name = st.sidebar.selectbox(
+    "Choisir le dataset",
+    options=list(DATASETS.keys()),
+    index=0
+)
+ds_path = DATASETS[selected_ds_name]
+curr_videos_dir = ds_path / "videos"
+curr_gt_dir = ds_path / "ground_truth"
 
-st.sidebar.subheader("Vidéos")
-available_datasets = discover_datasets(VIDEOS_DIR, GROUND_TRUTH_DIR)
+@st.cache_data
+def get_available_datasets(v_dir, g_dir):
+    return discover_datasets(v_dir, g_dir)
+
+available_datasets = get_available_datasets(curr_videos_dir, curr_gt_dir)
+
 total_videos = len(available_datasets)
 
 num_videos = st.sidebar.number_input(
@@ -172,25 +188,36 @@ if launch_btn:
         st.error("Veuillez sélectionner au moins un modèle.")
     else:
         with st.status("🛠️ Benchmark en cours...", expanded=True) as status:
+            progress_bar = st.progress(0)
+            progress_text = st.empty()
+            
+            def update_progress(current, total, message):
+                progress_bar.progress(current / total)
+                progress_text.text(message)
+
             st.write("Initialisation des modèles...")
             models = [MODEL_REGISTRY[key]() for key in selected_models]
             
             st.write("Lancement du moteur de benchmark...")
             t_start = time.time()
             
-            # On redirige les logs de runner.py vers Streamlit si possible ou on attend juste la fin
-            # Pour l'instant on exécute simplement la fonction
             results = run_benchmark(
                     models=models,
+                    videos_dir=curr_videos_dir,
+                    gt_dir=curr_gt_dir,
                     num_videos=num_videos if num_videos > 0 else None,
                     random_selection=use_shuffle,
                     save_masks=save_masks,
                     save_video=save_video,
-                    save_segmented=save_segmented
+                    save_segmented=save_segmented,
+                    progress_callback=update_progress
                 )
             
             t_end = time.time()
+            progress_bar.empty()
+            progress_text.empty()
             status.update(label=f"✅ Terminé en {t_end - t_start:.1f}s", state="complete")
+
         
         # ── Résultats ──
         st.success("Benchmark terminé avec succès !")
@@ -232,12 +259,27 @@ if launch_btn:
             # Métriques moyennes par modèle
             st.subheader("📈 Moyennes par Modèle")
             avg_df = df_display.groupby("model").mean(numeric_only=True).reset_index()
+            
             if not avg_df.empty:
-                st.table(avg_df)
+                # Arrondir pour un affichage propre
+                avg_df_styled = avg_df.style.format(precision=4)
+                st.dataframe(avg_df_styled, use_container_width=True)
+                
+                # Bouton de téléchargement des moyennes
+                avg_csv = avg_df.to_csv(index=False).encode('utf-8')
+                st.download_button(
+                    label="📊 Télécharger les MOYENNES par modèle (CSV)",
+                    data=avg_csv,
+                    file_name=f"model_averages_{int(time.time())}.csv",
+                    mime='text/csv',
+                    key="download_avg"
+                )
+
                 if "iou_mean" in avg_df.columns:
                     st.bar_chart(avg_df, x="model", y="iou_mean")
             else:
                 st.info("Pas assez de données valides pour calculer des moyennes.")
+
         else:
             st.warning("Aucun résultat n'a été produit. Vérifiez vos fichiers datasets.")
 

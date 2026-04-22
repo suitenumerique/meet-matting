@@ -1,9 +1,19 @@
-"""
-Benchmark Framework for Video Matting Models.
+import logging
+import warnings
 
-Évalue les performances de différents modèles de segmentation d'arrière-plan
-en termes de qualité (IoU, Boundary F-measure, Flow Warping Error)
-et d'efficacité (FLOPs/Frame, Latence p95).
-"""
+# Hard-disable Streamlit context warnings
+for logger_name in [
+    "streamlit.runtime.scriptrunner_utils.script_run_context",
+    "streamlit.runtime.scriptrunner",
+    "streamlit.runtime.state.session_state_proxy",
+    "streamlit"
+]:
+    logger = logging.getLogger(logger_name)
+    logger.setLevel(logging.ERROR)
+    logger.disabled = True
+
+warnings.filterwarnings("ignore", message="missing ScriptRunContext")
 
 __version__ = "1.0.0"
+
+

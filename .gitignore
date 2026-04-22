@@ -7,8 +7,9 @@
 
 # Datasets et Vidéos (Trop lourds pour Git)
 benchmark/dataset/
+benchmark/videos_masques/
 benchmark/videos/
-
+benchmark/temp_results
 # Résultats du Benchmark
 benchmark/output/
 benchmark/results/
