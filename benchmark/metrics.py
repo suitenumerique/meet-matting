@@ -1,10 +1,10 @@
 """
-Fonctions de calcul des métriques de qualité pour le Video Matting.
+Quality metric computation for Video Matting.
 
-Métriques implémentées :
+Implemented metrics:
   - IoU (Intersection over Union)
-  - Boundary F-measure (F1 sur les contours)
-  - Flow Warping Error (stabilité temporelle)
+  - Boundary F-measure (F1 on contours)
+  - Flow Warping Error (temporal stability)
 """
 
 import logging
@@ -15,8 +15,8 @@ import numpy as np
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from functools import partial
 
-# bound_ratio par défaut (règle DAVIS) : la tolérance de matching de contour
-# est 0.8% de la diagonale de l'image (~2 px à 480p, ~4 px à 1080p).
+# Default bound_ratio (DAVIS rule): the contour-matching tolerance is
+# 0.8% of the image diagonal (~2 px at 480p, ~4 px at 1080p).
 DEFAULT_BOUND_RATIO = 0.008
 
 logger = logging.getLogger(__name__)
@@ -31,28 +31,27 @@ def compute_iou(
     threshold: float = 0.5,
 ) -> float:
     """
-    Calcule l'IoU global sur toute la séquence vidéo.
+    Compute the global IoU over the whole video sequence.
 
-    Intersection et union sont cumulées sur l'ensemble des pixels de toutes
-    les frames, puis le ratio est calculé une seule fois. C'est un IoU
-    pixel-pondéré : les frames où l'objet est plus grand contribuent
-    davantage au score final.
+    Intersection and union are cumulated over all pixels of every frame,
+    then the ratio is computed once. This is a pixel-weighted IoU:
+    frames where the object is larger contribute more to the final score.
 
-    Conventions (alignées sur metrics/performance_metrics.py) :
-      - Binarisation avec `threshold` (défaut 0.5, seuil inclusif).
-      - Si l'union est vide sur toute la séquence -> retourne 1.0 (accord
-        parfait par convention : les deux masques sont vides partout).
-      - Si les shapes diffèrent entre pred et GT sur une frame, le masque
-        prédit est redimensionné sur la shape du GT (interpolation NEAREST).
+    Conventions (aligned with metrics/performance_metrics.py):
+      - Binarisation with `threshold` (default 0.5, inclusive threshold).
+      - If the union is empty across the whole sequence -> return 1.0
+        (perfect agreement by convention: both masks are empty everywhere).
+      - If shapes differ between pred and GT on a frame, the predicted
+        mask is resized to the GT shape (NEAREST interpolation).
 
     Args:
-        pred_masks: Liste de masques prédits, chacun (H, W) ou (H, W, 1),
-                    valeurs dans [0, 1].
-        gt_masks:   Liste de masques ground truth, chacun (H, W), dans [0, 1].
-        threshold:  Seuil de binarisation.
+        pred_masks: List of predicted masks, each (H, W) or (H, W, 1),
+                    values in [0, 1].
+        gt_masks:   List of ground-truth masks, each (H, W), values in [0, 1].
+        threshold:  Binarisation threshold.
 
     Returns:
-        IoU global dans [0, 1].
+        Global IoU in [0, 1].
     """
     n = min(len(pred_masks), len(gt_masks))
     if n == 0:
@@ -90,13 +89,13 @@ def compute_iou(
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def _extract_boundary(mask_bin: np.ndarray) -> np.ndarray:
     """
-    Extrait un contour 1-pixel par soustraction morphologique :
+    Extract a 1-pixel contour via morphological subtraction:
         boundary = mask - erode(mask)
 
-    Noyau croix 3x3 (4-voisinage). Contrairement à Canny, cette méthode
-    capture aussi les bords des trous internes du masque, ce qui les
-    pénalise dans le F-measure — comportement standard DAVIS, pertinent
-    pour le matting (les trous produisent des artefacts visibles).
+    3x3 cross kernel (4-neighbourhood). Unlike Canny, this method also
+    captures the edges of internal holes in the mask, penalising them
+    in the F-measure — DAVIS-standard behaviour, relevant for matting
+    (holes produce visible artifacts).
     """
     mask_u8 = mask_bin.astype(np.uint8)
     kernel = cv2.getStructuringElement(cv2.MORPH_CROSS, (3, 3))
@@ -111,27 +110,27 @@ def compute_boundary_f_measure(
     threshold: float = 0.5,
 ) -> float:
     """
-    Boundary F-measure binaire d'une frame (Perazzi et al. 2016, DAVIS).
+    Binary boundary F-measure of a frame (Perazzi et al. 2016, DAVIS).
 
-    Méthode alignée sur metrics/performance_metrics.py :
-      - Extraction du contour par érosion morphologique (trous internes
-        pénalisés — règle DAVIS, souhaitable pour le matting).
-      - Tolérance spatiale adaptée à la résolution :
+    Method aligned with metrics/performance_metrics.py:
+      - Contour extraction by morphological erosion (internal holes are
+        penalised — DAVIS rule, desirable for matting).
+      - Spatial tolerance scaled with the resolution:
             bound_radius = max(1, round(bound_ratio * sqrt(H^2 + W^2)))
-        Avec bound_ratio=0.008 (DAVIS), cela donne ~2 px à 480p, ~4 px à
-        1080p. Un pixel prédit est "matché" s'il tombe dans le contour GT
-        dilaté par un disque de rayon bound_radius (approx morphologique
-        du matching bipartite de Martin et al. 2004).
+        With bound_ratio=0.008 (DAVIS), this gives ~2 px at 480p, ~4 px
+        at 1080p. A predicted pixel is "matched" if it falls within the
+        GT contour dilated by a disk of radius bound_radius (morphological
+        approximation of the bipartite matching of Martin et al. 2004).
 
     Args:
-        pred:        Masque prédit (H, W) ou (H, W, 1), valeurs dans [0, 1].
-        gt:          Masque ground truth (H, W), valeurs dans [0, 1].
-        bound_ratio: Fraction de la diagonale utilisée comme rayon de
-                     tolérance. Défaut 0.008 (règle DAVIS).
-        threshold:   Seuil de binarisation (inclusif).
+        pred:        Predicted mask (H, W) or (H, W, 1), values in [0, 1].
+        gt:          Ground-truth mask (H, W), values in [0, 1].
+        bound_ratio: Fraction of the diagonal used as tolerance radius.
+                     Default 0.008 (DAVIS rule).
+        threshold:   Binarisation threshold (inclusive).
 
     Returns:
-        Score F1 des contours dans [0, 1].
+        Contour F1 score in [0, 1].
     """
     pred = np.asarray(pred).squeeze()
     gt = np.asarray(gt).squeeze()
@@ -154,23 +153,23 @@ def compute_boundary_f_measure(
     n_pred = int(pred_boundary.sum())
     n_gt = int(gt_boundary.sum())
 
-    # Cas limites : aucun contour d'un côté
+    # Edge cases: no contour on either side
     if n_pred == 0 and n_gt == 0:
-        return 1.0  # accord : pas d'objet nulle part
+        return 1.0  # agreement: no object anywhere
     if n_pred == 0 or n_gt == 0:
-        return 0.0  # un seul contour existe -> pas de matching possible
+        return 0.0  # only one contour exists -> no matching possible
 
-    # Rayon de tolérance en pixels (règle DAVIS : % de la diagonale)
+    # Tolerance radius in pixels (DAVIS rule: % of the diagonal)
     h, w = gt_bin.shape[:2]
     diag = np.sqrt(h ** 2 + w ** 2)
     bound_radius = max(1, int(np.round(bound_ratio * diag)))
     ksize = 2 * bound_radius + 1
     disk = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ksize, ksize))
 
-    # Matching morphologique : un pixel prédit est matché s'il tombe dans
-    # le contour GT dilaté (numérateur de la précision). Symétriquement
-    # pour le recall. Les deux comptes diffèrent quand les contours ont
-    # des densités différentes.
+    # Morphological matching: a predicted pixel is matched if it falls
+    # within the dilated GT contour (numerator of precision). Symmetric
+    # for recall. The two counts differ when the contours have different
+    # densities.
     pred_dil = cv2.dilate(pred_boundary, disk)
     gt_dil = cv2.dilate(gt_boundary, disk)
     matched_pred = int(np.logical_and(pred_boundary, gt_dil).sum())
@@ -186,14 +185,14 @@ def compute_boundary_f_measure(
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  Flow Warping Error — Stabilité temporelle
+#  Flow Warping Error — Temporal stability
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# Seuil par défaut d'erreur photométrique L1 (sur RGB normalisé [0, 1])
-# au-delà duquel un pixel est considéré invalide (désocclusion / échec du
-# flux optique) et exclu de l'agrégation Lai et al. 2018.
+# Default L1 photometric-error threshold (on normalised RGB [0, 1])
+# above which a pixel is considered invalid (disocclusion / optical-flow
+# failure) and excluded from the aggregation (Lai et al. 2018).
 DEFAULT_PHOTO_THRESHOLD = 0.05
 
-# Paramètres Farneback (mêmes valeurs que metrics/performance_metrics.py)
+# Farneback parameters (same values as metrics/performance_metrics.py)
 _FARNEBACK_PARAMS = dict(
     pyr_scale=0.5, levels=3, winsize=15, iterations=3,
     poly_n=5, poly_sigma=1.2, flags=0,
@@ -202,12 +201,12 @@ _FARNEBACK_PARAMS = dict(
 
 def _warp_with_flow(image: np.ndarray, flow: np.ndarray) -> np.ndarray:
     """
-    Backward-warp `image` avec `flow` :
+    Backward-warp `image` with `flow`:
         warped[y, x] = image[y + flow_y(y, x), x + flow_x(y, x)]
 
-    Usage typique : image = frame_{t-1} et flow = F_{t -> t-1} (flux backward) ;
-    `warped` est alors une estimation de frame t construite en tirant les
-    pixels de frame_{t-1} le long du flux. Les lookups hors-image sont mis à 0.
+    Typical usage: image = frame_{t-1} and flow = F_{t -> t-1} (backward
+    flow); `warped` is then an estimate of frame t built by pulling the
+    pixels of frame_{t-1} along the flow. Out-of-image lookups are set to 0.
     """
     h, w = image.shape[:2]
     grid_y, grid_x = np.mgrid[0:h, 0:w].astype(np.float32)
@@ -229,26 +228,26 @@ def _lai_validity_mask(
     photo_threshold: float,
 ) -> np.ndarray:
     """
-    Masque de validité (H, W) dans {0, 1}. Un pixel est marqué valide ssi :
-      1) cohérence forward/backward du flux (Sundaram et al. 2010) : aller
-         t -> t-1 via flow_bwd puis revenir via flow_fwd retombe au point
-         de départ à un seuil adaptatif près ;
-      2) cohérence photométrique (Lai et al. 2018) : warper frame_{t-1}
-         vers frame t reproduit la couleur observée avec une erreur L1
-         inférieure à `photo_threshold`.
-    Les pixels qui échouent l'un ou l'autre test correspondent typiquement
-    aux désocclusions ou aux failures du flux et sont exclus du score.
+    Validity mask (H, W) in {0, 1}. A pixel is flagged valid iff:
+      1) forward/backward flow consistency (Sundaram et al. 2010): going
+         t -> t-1 via flow_bwd and then back via flow_fwd lands near the
+         starting point, up to an adaptive threshold;
+      2) photometric consistency (Lai et al. 2018): warping frame_{t-1}
+         onto frame t reproduces the observed colour with an L1 error
+         below `photo_threshold`.
+    Pixels that fail either check typically correspond to disocclusions
+    or flow failures and are excluded from the score.
     """
-    # (1) Cohérence forward/backward
+    # (1) Forward/backward consistency
     flow_fwd_at_t = _warp_with_flow(flow_fwd, flow_bwd)
-    diff = flow_fwd_at_t + flow_bwd  # ≈ 0 si les flux sont cohérents
+    diff = flow_fwd_at_t + flow_bwd  # ≈ 0 if the two flows are consistent
     diff_sq = (diff ** 2).sum(axis=-1)
     mag_sq = (flow_fwd_at_t ** 2).sum(axis=-1) + (flow_bwd ** 2).sum(axis=-1)
-    # Seuil adaptatif (Sundaram) : 1% de la norme au carré + un plancher de
-    # 0.5 pour ne pas rejeter à tort les pixels quasi-statiques.
+    # Adaptive threshold (Sundaram): 1% of the squared magnitude, plus a
+    # 0.5 floor so that near-static pixels are not wrongly rejected.
     fb_ok = diff_sq <= 0.01 * mag_sq + 0.5
 
-    # (2) Cohérence photométrique
+    # (2) Photometric consistency
     frame_prev_warped = _warp_with_flow(frame_prev, flow_bwd)
     photo_err = np.abs(frame_curr - frame_prev_warped).mean(axis=-1)
     photo_ok = photo_err <= photo_threshold
@@ -263,44 +262,46 @@ def compute_flow_warping_error(
     photo_threshold: float = DEFAULT_PHOTO_THRESHOLD,
 ) -> float:
     """
-    Flow Warping Error (Lai et al. 2018) via Farneback, pleine résolution.
+    Flow Warping Error (Lai et al. 2018) via Farneback, at full resolution.
 
-    Pour chaque paire (t-1, t) :
-      - Estime les flux forward F_{t-1 -> t} et backward F_{t -> t-1}
-        au niveau Farneback.
-      - Warpe le masque t-1 dans le référentiel de t via le flux backward.
-      - Calcule l'erreur L1 avec le masque t, pondérée par un masque de
-        validité (cohérence fwd/bwd + photométrique).
-    L'erreur finale est une moyenne globale pondérée par le nombre de
-    pixels valides sur toute la séquence — et non une moyenne par frame.
+    For each pair (t-1, t):
+      - Estimate the forward flow F_{t-1 -> t} and backward flow
+        F_{t -> t-1} at the Farneback level.
+      - Warp the mask at t-1 into the frame t reference via the backward
+        flow.
+      - Compute the L1 error with the mask at t, weighted by a validity
+        mask (fwd/bwd consistency + photometric).
+    The final error is a global mean weighted by the number of valid
+    pixels over the whole sequence — not a per-frame average.
 
-    Note : la boucle fusionne le calcul du flux et l'agrégation pour éviter
-    de stocker tous les flux simultanément en mémoire.
+    Note: the loop fuses flow computation and aggregation to avoid
+    storing every flow in memory at once.
 
     Args:
-        masks:           Liste de masques (H, W) ou (H, W, 1) dans [0, 1],
-                         ordonnés temporellement.
-        frames:          Itérable de frames BGR (convention OpenCV), (H, W, 3)
-                         ou (H, W, 4). Requis : sans frames l'erreur n'est
-                         pas calculable de façon sensée -> 0.0 + warning.
-        threshold:       Seuil de binarisation des masques (inclusif).
-        photo_threshold: Erreur L1 max (RGB normalisé) pour qu'un pixel soit
-                         considéré valide. Défaut 0.05.
+        masks:           List of masks (H, W) or (H, W, 1) in [0, 1],
+                         ordered temporally.
+        frames:          Iterable of BGR frames (OpenCV convention),
+                         (H, W, 3) or (H, W, 4). Required: without frames
+                         the error cannot be sensibly computed -> 0.0 +
+                         warning.
+        threshold:       Mask binarisation threshold (inclusive).
+        photo_threshold: Max L1 error (on normalised RGB) for a pixel to
+                         be considered valid. Default 0.05.
 
     Returns:
-        Erreur moyenne pondérée dans [0, 1]. Plus bas = meilleure stabilité.
+        Weighted mean error in [0, 1]. Lower = better stability.
     """
     if frames is None:
         logger.warning(
-            "FWE : aucune frame RGB fournie — la métrique requiert les frames "
-            "source pour la cohérence photométrique. Retour 0.0."
+            "FWE: no RGB frames provided — the metric requires the source "
+            "frames for photometric consistency. Returning 0.0."
         )
         return 0.0
 
     if len(masks) < 2:
         return 0.0
 
-    # --- Matérialiser les frames et les convertir BGR -> RGB float32 [0, 1] ---
+    # --- Materialise frames and convert BGR -> RGB float32 [0, 1] ---
     frame_list = list(frames)
     t_max = min(len(masks), len(frame_list))
     if t_max < 2:
@@ -315,7 +316,7 @@ def compute_flow_warping_error(
     video = np.stack(video_list, axis=0).astype(np.float32) / 255.0  # (T, H, W, 3)
     t_max, h, w = video.shape[:3]
 
-    # --- Binariser + aligner les masques sur (h, w) ---
+    # --- Binarise + align masks on (h, w) ---
     mask_stack: List[np.ndarray] = []
     for m in masks[:t_max]:
         m_sq = np.asarray(m).squeeze().astype(np.float32)
@@ -327,13 +328,13 @@ def compute_flow_warping_error(
         mask_stack.append(m_bin)
     masks_arr = np.stack(mask_stack, axis=0)  # (T, H, W)
 
-    # --- Niveaux de gris pour Farneback ---
+    # --- Grayscale for Farneback ---
     gray = np.stack([
         cv2.cvtColor((f * 255).astype(np.uint8), cv2.COLOR_RGB2GRAY)
         for f in video
     ])  # (T, H, W) uint8
 
-    # --- Boucle principale : flux bidirectionnel + agrégation streaming ---
+    # --- Main loop: bidirectional flow + streaming aggregation ---
     total_err = 0.0
     total_valid = 0.0
     for t in range(1, t_max):
@@ -359,10 +360,10 @@ def compute_flow_warping_error(
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  Agrégation par vidéo
+#  Per-video aggregation
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def _compute_single_frame_bf(pair):
-    """Calcul Boundary F-measure pour une frame (helper multiprocessing)."""
+    """Compute the Boundary F-measure for a single frame (multiprocessing helper)."""
     pred, gt = pair
     return compute_boundary_f_measure(pred, gt)
 
@@ -373,16 +374,16 @@ def compute_all_metrics(
     frames: Optional[Iterable[np.ndarray]] = None,
 ) -> dict:
     """
-    Calcule toutes les métriques de qualité sur une séquence vidéo.
+    Compute every quality metric for a video sequence.
 
-    IoU : calculé globalement sur la séquence (pixel-weighted, un seul
-    ratio pour toute la vidéo). `iou_std` est exposé à 0.0 — la métrique
-    n'a plus de dispersion par frame. La clé est conservée pour
-    compatibilité avec les rapports en aval.
+    IoU: computed globally on the sequence (pixel-weighted, a single
+    ratio for the whole video). `iou_std` is exposed as 0.0 — the metric
+    no longer has per-frame dispersion. The key is kept for compatibility
+    with downstream reports.
     """
     n = min(len(pred_masks), len(gt_masks))
     if n == 0:
-        logger.error("Aucun masque disponible pour le calcul des métriques.")
+        logger.error("No mask available for metric computation.")
         return {
             "iou_mean": 0.0,
             "iou_std": 0.0,
@@ -391,15 +392,15 @@ def compute_all_metrics(
             "flow_warping_error": 0.0,
         }
 
-    # IoU global sur toute la séquence (un seul ratio agrégé)
+    # Global IoU over the whole sequence (single aggregated ratio)
     iou_global = compute_iou(pred_masks[:n], gt_masks[:n])
 
-    # Boundary F par frame (parallélisé — ThreadPool, OpenCV libère le GIL)
+    # Boundary F per frame (parallelised — ThreadPool, OpenCV releases the GIL)
     pairs = list(zip(pred_masks[:n], gt_masks[:n]))
     with ThreadPoolExecutor(max_workers=8) as executor:
         boundary_fs = list(executor.map(_compute_single_frame_bf, pairs))
 
-    # Flow warping error sur les prédictions
+    # Flow warping error on the predictions
     fwe = compute_flow_warping_error(
         pred_masks[:n],
         frames,

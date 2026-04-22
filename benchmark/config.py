@@ -1,14 +1,14 @@
 """
-Configuration centralisée pour le benchmark.
+Centralized configuration for the benchmark.
 
-Définit les chemins, les seuils par défaut et les paramètres globaux.
+Defines paths, default thresholds and global parameters.
 """
 
 import os
 from pathlib import Path
 
 # ──────────────────────────────────────────────
-# Chemins
+# Paths
 # ──────────────────────────────────────────────
 BENCHMARK_ROOT = Path(os.path.dirname(os.path.abspath(__file__)))
 DATASET_DIR = BENCHMARK_ROOT / "dataset"
@@ -18,32 +18,32 @@ TEMP_RESULTS_DIR = BENCHMARK_ROOT / "temp_results"
 OUTPUT_DIR = BENCHMARK_ROOT / "output"
 
 # ──────────────────────────────────────────────
-# Paramètres d'inférence
+# Inference parameters
 # ──────────────────────────────────────────────
-# Résolution cible pour les modèles (H, W). None = résolution native.
+# Target resolution for the models (H, W). None = native resolution.
 DEFAULT_INPUT_SIZE = (256, 256)
 
-# Nombre de frames de warm-up ignorées pour la mesure de latence (passe principale)
+# Number of warm-up frames ignored for latency measurement (main pass)
 WARMUP_FRAMES = 5
 
-# Percentile pour la latence
+# Percentile used for latency
 LATENCY_PERCENTILE = 95
 
-# Passe latence dédiée (batch=1, frames réelles)
-LATENCY_WARMUP_FRAMES = 20   # frames de chauffe, non mesurées
-LATENCY_N_FRAMES = 50        # frames effectivement chronométrées
+# Dedicated latency pass (batch=1, real frames)
+LATENCY_WARMUP_FRAMES = 20   # warm-up frames, not measured
+LATENCY_N_FRAMES = 50        # frames actually timed
 
-# Seuil de binarisation des masques (pour les modèles produisant des alpha mattes)
+# Binarization threshold for masks (for models producing alpha mattes)
 MASK_THRESHOLD = 0.5
 
 # ──────────────────────────────────────────────
-# Paramètres des métriques
+# Metric parameters
 # ──────────────────────────────────────────────
-# Rayon en pixels pour le Boundary F-measure
+# Radius in pixels for the Boundary F-measure
 BOUNDARY_TOLERANCE_PX = 3
 
 # ──────────────────────────────────────────────
-# Rapport
+# Report
 # ──────────────────────────────────────────────
 RESULTS_CSV_FILENAME = "benchmark_results.csv"
 RESULTS_JSON_FILENAME = "benchmark_results.json"

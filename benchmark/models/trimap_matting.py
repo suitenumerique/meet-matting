@@ -1,14 +1,14 @@
 """
-Wrapper pour l'approche Trimap-based Matting (classique/hybride).
+Wrapper for the Trimap-based Matting approach (classical / hybrid).
 
-Pipeline hybride en 2 étapes :
-  1. Génération automatique d'un trimap à partir d'un segmenteur léger.
-  2. Alpha matting guidé par le trimap via l'algorithme classique de Levin et al.
-     ou un réseau de matting (si disponible).
+Two-stage hybrid pipeline:
+  1. Automatic trimap generation from a lightweight segmenter.
+  2. Trimap-guided alpha matting via the classical algorithm of Levin et al.
+     or a matting network (if available).
 
-Cette implémentation utilise GrabCut d'OpenCV comme approximation
-robuste du matting guidé par trimap, ce qui évite des dépendances
-supplémentaires tout en fournissant un baseline solide.
+This implementation uses OpenCV's GrabCut as a robust approximation of
+trimap-guided matting, which avoids extra dependencies while providing
+a solid baseline.
 """
 
 import logging
@@ -24,13 +24,13 @@ logger = logging.getLogger(__name__)
 
 class TrimapMattingWrapper(BaseModelWrapper):
     """
-    Matting hybride basé sur un trimap auto-généré + GrabCut.
+    Hybrid matting based on an auto-generated trimap + GrabCut.
 
-    Le trimap est construit par :
-      1. Seuillage Otsu sur le canal de luminance → masque initial.
-      2. Érosion → zone « definite foreground ».
-      3. Dilatation → la différence donne la zone « probably foreground ».
-      4. GrabCut affine le masque.
+    The trimap is built by:
+      1. Otsu thresholding on the luminance channel → initial mask.
+      2. Erosion → "definite foreground" region.
+      3. Dilation → the difference yields the "probably foreground" region.
+      4. GrabCut refines the mask.
     """
 
     def __init__(self, erosion_size: int = 10, dilation_size: int = 20):
@@ -43,24 +43,24 @@ class TrimapMattingWrapper(BaseModelWrapper):
 
     @property
     def input_size(self) -> Optional[Tuple[int, int]]:
-        return None  # Taille native
+        return None  # Native size
 
     def load(self) -> None:
-        # Pas de modèle à charger — algorithme classique OpenCV
-        logger.info("TrimapMatting: initialisé (OpenCV GrabCut).")
+        # No model to load — classical OpenCV algorithm
+        logger.info("TrimapMatting: initialised (OpenCV GrabCut).")
 
     def predict(self, frame_bgr: np.ndarray) -> np.ndarray:
         h, w = frame_bgr.shape[:2]
 
-        # ── Étape 1 : Segmentation grossière par seuillage ──
+        # ── Step 1: Coarse segmentation by thresholding ──
         gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
-        # Filtre bilatéral pour lisser tout en préservant les bords
+        # Bilateral filter to smooth while preserving edges
         gray_filtered = cv2.bilateralFilter(gray, 9, 75, 75)
         _, binary = cv2.threshold(
             gray_filtered, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
         )
 
-        # ── Étape 2 : Génération du trimap ──
+        # ── Step 2: Trimap generation ──
         kernel_erode = cv2.getStructuringElement(
             cv2.MORPH_ELLIPSE,
             (self._erosion_size, self._erosion_size),
@@ -73,13 +73,13 @@ class TrimapMattingWrapper(BaseModelWrapper):
         fg_sure = cv2.erode(binary, kernel_erode)
         bg_sure = cv2.bitwise_not(cv2.dilate(binary, kernel_dilate))
 
-        # Construire le masque GrabCut
-        # 0 = BG défini, 1 = FG défini, 2 = BG probable, 3 = FG probable
+        # Build the GrabCut mask
+        # 0 = definite BG, 1 = definite FG, 2 = probable BG, 3 = probable FG
         grabcut_mask = np.full((h, w), cv2.GC_PR_FGD, dtype=np.uint8)
         grabcut_mask[bg_sure > 0] = cv2.GC_BGD
         grabcut_mask[fg_sure > 0] = cv2.GC_FGD
 
-        # ── Étape 3 : GrabCut ──
+        # ── Step 3: GrabCut ──
         bgd_model = np.zeros((1, 65), dtype=np.float64)
         fgd_model = np.zeros((1, 65), dtype=np.float64)
 
@@ -94,10 +94,10 @@ class TrimapMattingWrapper(BaseModelWrapper):
                 mode=cv2.GC_INIT_WITH_MASK,
             )
         except cv2.error as e:
-            logger.warning("GrabCut a échoué: %s. Retour au masque binaire.", e)
+            logger.warning("GrabCut failed: %s. Falling back to the binary mask.", e)
             return (binary / 255.0).astype(np.float32)
 
-        # Masque final : FG défini ou FG probable
+        # Final mask: definite FG or probable FG
         result_mask = np.where(
             (grabcut_mask == cv2.GC_FGD) | (grabcut_mask == cv2.GC_PR_FGD),
             1.0,
@@ -107,9 +107,9 @@ class TrimapMattingWrapper(BaseModelWrapper):
         return result_mask
 
     def get_flops(self, input_shape: Tuple[int, int, int] = (3, 256, 256)) -> float:
-        # GrabCut n'a pas de FLOPs DNN conventionnels
-        # On retourne -1 pour indiquer "non applicable"
+        # GrabCut has no conventional DNN FLOPs
+        # Return -1 to indicate "not applicable"
         return -1.0
 
     def cleanup(self) -> None:
-        logger.info("TrimapMatting: aucune ressource à libérer.")
+        logger.info("TrimapMatting: no resources to release.")

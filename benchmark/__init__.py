@@ -1,9 +1,9 @@
 """
 Benchmark Framework for Video Matting Models.
 
-Évalue les performances de différents modèles de segmentation d'arrière-plan
-en termes de qualité (IoU, Boundary F-measure, Flow Warping Error)
-et d'efficacité (FLOPs/Frame, Latence p95).
+Evaluates the performance of different background-segmentation models
+in terms of quality (IoU, Boundary F-measure, Flow Warping Error)
+and efficiency (FLOPs/Frame, p95 Latency).
 """
 
 __version__ = "1.0.0"

@@ -1,12 +1,12 @@
 """
-Classe de base abstraite pour tous les wrappers de modèles de segmentation.
+Abstract base class for every segmentation-model wrapper.
 
-Chaque modèle DOIT implémenter :
-  - name         : Nom lisible du modèle.
-  - load()       : Chargement en mémoire (poids, session ONNX, etc.).
-  - predict()    : Inférence sur une frame BGR → masque float [0,1].
-  - cleanup()    : Libération des ressources GPU/mémoire.
-  - get_flops()  : Estimation ou mesure des FLOPs par frame.
+Each model MUST implement:
+  - name         : Human-readable model name.
+  - load()       : Load into memory (weights, ONNX session, etc.).
+  - predict()    : Inference on a BGR frame → float mask in [0, 1].
+  - cleanup()    : Release GPU / memory resources.
+  - get_flops()  : Estimate or measure of FLOPs per frame.
 """
 
 from abc import ABC, abstractmethod
@@ -16,92 +16,92 @@ import numpy as np
 
 
 class BaseModelWrapper(ABC):
-    """Interface commune pour tous les modèles de Video Matting."""
+    """Common interface for every Video Matting model."""
 
     @property
     @abstractmethod
     def name(self) -> str:
-        """Nom lisible du modèle (ex: 'MediaPipe Portrait')."""
+        """Human-readable model name (e.g. 'MediaPipe Portrait')."""
         ...
 
     @property
     def input_size(self) -> Optional[Tuple[int, int]]:
         """
-        Taille d'entrée attendue (H, W). None si la taille est dynamique.
-        Utilisé pour le redimensionnement automatique avant inférence.
+        Expected input size (H, W). None if the size is dynamic.
+        Used for automatic resizing before inference.
         """
         return None
 
     @abstractmethod
     def load(self) -> None:
         """
-        Charge le modèle en mémoire.
+        Load the model into memory.
 
-        Cette méthode est appelée une seule fois avant la boucle d'inférence.
-        Elle doit télécharger les poids si nécessaire et initialiser la session.
+        This method is called once before the inference loop.
+        It must download the weights if needed and initialise the session.
         """
         ...
 
     @abstractmethod
     def predict(self, frame_bgr: np.ndarray) -> np.ndarray:
         """
-        Exécute l'inférence sur une frame BGR.
+        Run inference on a BGR frame.
 
-        L'implémentation doit gérer le pre-processing (resize, normalisation)
-        et le post-processing (seuillage, resize vers taille originale).
+        The implementation must handle pre-processing (resize, normalisation)
+        and post-processing (thresholding, resize back to the original size).
 
         Args:
-            frame_bgr: Image BGR (H, W, 3) en uint8.
+            frame_bgr: BGR image (H, W, 3) as uint8.
 
         Returns:
-            Masque de segmentation (H, W) en float32 [0, 1].
-            H,W doivent correspondre aux dimensions de la frame d'entrée.
+            Segmentation mask (H, W) as float32 in [0, 1].
+            H, W must match the input frame dimensions.
         """
         ...
 
     def predict_batch(self, frames_bgr: List[np.ndarray]) -> List[np.ndarray]:
         """
-        Exécute l'inférence sur un lot de frames BGR.
+        Run inference on a batch of BGR frames.
 
-        Par défaut, cette méthode boucle sur predict().
-        Elle devrait être surchargée pour les modèles supportant le batching natif
-        (ex: ONNX, PyTorch) afin de maximiser l'utilisation du GPU.
+        By default this method loops over predict().
+        It should be overridden for models that natively support batching
+        (e.g. ONNX, PyTorch) in order to maximise GPU utilisation.
 
         Args:
-            frames_bgr: Liste de frames BGR (H, W, 3) en uint8.
+            frames_bgr: List of BGR frames (H, W, 3) as uint8.
 
         Returns:
-            Liste de masques (H, W) en float32 [0, 1].
+            List of masks (H, W) as float32 in [0, 1].
         """
         return [self.predict(f) for f in frames_bgr]
 
     @abstractmethod
     def get_flops(self, input_shape: Tuple[int, int, int] = (3, 256, 256)) -> float:
         """
-        Retourne le nombre de FLOPs pour une inférence.
+        Return the number of FLOPs for one inference.
 
         Args:
-            input_shape: Shape de l'input (C, H, W).
+            input_shape: Shape of the input (C, H, W).
 
         Returns:
-            Nombre de FLOPs (Floating Point Operations). -1 si non mesurable.
+            Number of FLOPs (Floating Point Operations). -1 if not measurable.
         """
         ...
 
     def reset_state(self) -> None:
         """
-        Réinitialise l'état interne du modèle (pour les modèles récurrents
-        comme RVM qui maintiennent un état entre les frames).
+        Reset the model's internal state (for recurrent models such as
+        RVM that maintain state between frames).
 
-        Appelé au début de chaque vidéo.
+        Called at the start of each video.
         """
         pass
 
     def cleanup(self) -> None:
         """
-        Libère les ressources (GPU, sessions ONNX, etc.).
+        Release resources (GPU, ONNX sessions, etc.).
 
-        Appelé après la fin du benchmark pour ce modèle.
+        Called after the benchmark finishes for this model.
         """
         pass
 

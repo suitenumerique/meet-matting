@@ -1,14 +1,14 @@
 """
-Wrapper pour Robust Video Matting (RVM).
+Wrapper for Robust Video Matting (RVM).
 
-RVM est un modèle récurrent (GRU-based) qui maintient un état interne
-entre les frames pour produire des alpha mattes temporellement cohérents.
+RVM is a recurrent (GRU-based) model that maintains an internal state
+between frames to produce temporally coherent alpha mattes.
 
-Ce wrapper supporte l'inférence via :
-  - ONNX Runtime (recommandé pour le benchmark, plus portable)
-  - PyTorch natif (fallback)
+This wrapper supports inference via:
+  - ONNX Runtime (recommended for the benchmark, more portable)
+  - Native PyTorch (fallback)
 
-Modèle : https://github.com/PeterL1n/RobustVideoMatting
+Model: https://github.com/PeterL1n/RobustVideoMatting
 """
 
 import logging
@@ -22,7 +22,7 @@ from .base import BaseModelWrapper
 
 logger = logging.getLogger(__name__)
 
-# Chemin local par défaut pour le modèle ONNX
+# Default local path for the ONNX model
 _DEFAULT_MODEL_PATH = Path(__file__).parent.parent / "weights" / "rvm_mobilenetv3_fp32.onnx"
 _MODEL_URL = (
     "https://github.com/PeterL1n/RobustVideoMatting/releases/download/v1.0.0/"
@@ -34,8 +34,8 @@ class RVMWrapper(BaseModelWrapper):
     """
     Robust Video Matting via ONNX Runtime.
 
-    Maintient des états récurrents (r1..r4) entre les frames.
-    reset_state() doit être appelé au début de chaque nouvelle vidéo.
+    Maintains recurrent states (r1..r4) between frames.
+    reset_state() must be called at the start of each new video.
     """
 
     def __init__(self, model_path: Optional[str] = None, downsample_ratio: float = 0.25):
@@ -50,23 +50,23 @@ class RVMWrapper(BaseModelWrapper):
 
     @property
     def input_size(self) -> Optional[Tuple[int, int]]:
-        return None  # Dynamique, dépend de la vidéo
+        return None  # Dynamic, depends on the video
 
     def load(self) -> None:
         try:
             import onnxruntime as ort
         except ImportError as e:
             raise ImportError(
-                "onnxruntime est requis. Installe-le via : pip install onnxruntime"
+                "onnxruntime is required. Install it via: pip install onnxruntime"
             ) from e
 
-        # Télécharger si absent
+        # Download if missing
         if not self._model_path.exists():
-            logger.info("RVM: téléchargement du modèle depuis %s", _MODEL_URL)
+            logger.info("RVM: downloading model from %s", _MODEL_URL)
             self._download_model()
 
         providers = ort.get_available_providers()
-        # Priorité aux accélérateurs matériels (CoreML sur Mac, CUDA sur NVIDIA)
+        # Prioritise hardware accelerators (CoreML on Mac, CUDA on NVIDIA)
         selected_providers = []
         if "CoreMLExecutionProvider" in providers:
             selected_providers.append("CoreMLExecutionProvider")
@@ -91,24 +91,24 @@ class RVMWrapper(BaseModelWrapper):
                 actual_providers.append(p)
 
         self._session = ort.InferenceSession(
-            str(self._model_path), 
+            str(self._model_path),
             providers=actual_providers,
             sess_options=sess_options
         )
         self.reset_state()
-        logger.info("RVM: modèle ONNX chargé (%s).", self._model_path.name)
+        logger.info("RVM: ONNX model loaded (%s).", self._model_path.name)
 
     def _download_model(self) -> None:
-        """Télécharge le modèle ONNX depuis GitHub."""
+        """Download the ONNX model from GitHub."""
         import urllib.request
 
         self._model_path.parent.mkdir(parents=True, exist_ok=True)
-        logger.info("RVM: téléchargement vers %s …", self._model_path)
+        logger.info("RVM: downloading to %s …", self._model_path)
         urllib.request.urlretrieve(_MODEL_URL, str(self._model_path))
-        logger.info("RVM: téléchargement terminé.")
+        logger.info("RVM: download complete.")
 
     def reset_state(self) -> None:
-        """Réinitialise les états récurrents GRU entre vidéos."""
+        """Reset the recurrent GRU states between videos."""
         self._recurrent_state = {
             "r1i": np.zeros((1, 1, 1, 1), dtype=np.float32),
             "r2i": np.zeros((1, 1, 1, 1), dtype=np.float32),
@@ -118,17 +118,17 @@ class RVMWrapper(BaseModelWrapper):
 
     def predict(self, frame_bgr: np.ndarray) -> np.ndarray:
         if self._session is None:
-            raise RuntimeError("RVM: modèle non chargé. Appelle load() d'abord.")
+            raise RuntimeError("RVM: model not loaded. Call load() first.")
 
         h_orig, w_orig = frame_bgr.shape[:2]
 
-        # Pre-processing : BGR -> RGB, HWC -> NCHW, normalise [0,1]
+        # Pre-processing: BGR -> RGB, HWC -> NCHW, normalise [0,1]
         frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
         tensor = frame_rgb.astype(np.float32) / 255.0
         tensor = np.transpose(tensor, (2, 0, 1))  # CHW
         tensor = np.expand_dims(tensor, axis=0)     # NCHW
 
-        # Inférence
+        # Inference
         inputs = {
             "src": tensor,
             "r1i": self._recurrent_state["r1i"],
@@ -140,10 +140,10 @@ class RVMWrapper(BaseModelWrapper):
 
         outputs = self._session.run(None, inputs)
 
-        # Outputs : [fgr, pha, r1o, r2o, r3o, r4o]
+        # Outputs: [fgr, pha, r1o, r2o, r3o, r4o]
         alpha = outputs[1]  # (1, 1, H, W)
 
-        # Mettre à jour l'état récurrent
+        # Update the recurrent state
         self._recurrent_state["r1i"] = outputs[2]
         self._recurrent_state["r2i"] = outputs[3]
         self._recurrent_state["r3i"] = outputs[4]
@@ -159,13 +159,13 @@ class RVMWrapper(BaseModelWrapper):
         return mask.astype(np.float32)
 
     def get_flops(self, input_shape: Tuple[int, int, int] = (3, 256, 256)) -> float:
-        # RVM MobileNetV3 : ~600 MFLOPs à 256x256
+        # RVM MobileNetV3: ~600 MFLOPs at 256x256
         c, h, w = input_shape
-        base_flops = 600e6  # pour 256x256
+        base_flops = 600e6  # for 256x256
         scale = (h * w) / (256 * 256)
         return base_flops * scale
 
     def cleanup(self) -> None:
         self._session = None
         self._recurrent_state = None
-        logger.info("RVM: session ONNX fermée.")
+        logger.info("RVM: ONNX session closed.")

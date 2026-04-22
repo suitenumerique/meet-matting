@@ -1,12 +1,12 @@
 """
-Moteur principal du benchmark de Video Matting.
+Main engine of the Video Matting benchmark.
 
-Orchestre le workflow complet pour chaque couple (vidéo, modèle) :
-  1. Inférence  → masques sauvegardés + latences mesurées
-  2. Évaluation → métriques calculées vs Ground Truth
-  3. Rapport    → résultats agrégés en CSV/JSON
+Orchestrates the full workflow for each (video, model) pair:
+  1. Inference   → saved masks + measured latencies
+  2. Evaluation  → metrics computed vs. Ground Truth
+  3. Report      → aggregated results in CSV / JSON
 
-Le calcul des métriques est strictement séparé de la mesure de latence.
+Metric computation is strictly separated from latency measurement.
 """
 
 import csv
@@ -42,14 +42,14 @@ logger = logging.getLogger(__name__)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  Utilitaires vidéo
+#  Video utilities
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def _get_video_info(video_path: Path) -> Tuple[int, float, Tuple[int, int]]:
-    """Retourne (nombre_frames, fps, (h, w)) d'une vidéo."""
+    """Return (num_frames, fps, (h, w)) for a video."""
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
-        raise IOError(f"Impossible d'ouvrir la vidéo : {video_path}")
-    
+        raise IOError(f"Unable to open the video: {video_path}")
+
     num_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
     w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -59,7 +59,7 @@ def _get_video_info(video_path: Path) -> Tuple[int, float, Tuple[int, int]]:
 
 
 class VideoPrefetcher:
-    """Lit les frames d'une vidéo dans un thread séparé pour saturer l'inférence."""
+    """Reads video frames in a separate thread to saturate inference."""
     def __init__(self, video_path: Path, queue_size: int = 32):
         self.video_path = video_path
         self.queue = queue.Queue(maxsize=queue_size)
@@ -67,7 +67,7 @@ class VideoPrefetcher:
         self.thread = threading.Thread(target=self._run, daemon=True)
 
     def start(self):
-        # Attacher le contexte Streamlit si on est dans un dashboard pour éviter les warnings
+        # Attach the Streamlit context if running inside a dashboard to avoid warnings
         try:
             from streamlit.runtime.scriptrunner import get_script_run_context, add_script_run_context
             ctx = get_script_run_context()
@@ -75,7 +75,7 @@ class VideoPrefetcher:
                 add_script_run_context(self.thread)
         except ImportError:
             pass
-            
+
         self.thread.start()
         return self
 
@@ -107,11 +107,11 @@ class VideoPrefetcher:
 
 
 def _iter_video_frames(video_path: Path) -> Generator[np.ndarray, None, None]:
-    """Générateur de frames pour une vidéo (économise la RAM)."""
+    """Frame generator for a video (saves RAM)."""
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
-        raise IOError(f"Impossible d'ouvrir la vidéo : {video_path}")
-    
+        raise IOError(f"Unable to open the video: {video_path}")
+
     try:
         while True:
             ret, frame = cap.read()
@@ -124,11 +124,11 @@ def _iter_video_frames(video_path: Path) -> Generator[np.ndarray, None, None]:
 
 def _read_video_frames(video_path: Path) -> Tuple[List[np.ndarray], float]:
     """
-    Lit toutes les frames d'une vidéo (obsolète, préféré _iter_video_frames).
+    Read every frame of a video (deprecated, prefer _iter_video_frames).
     """
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
-        raise IOError(f"Impossible d'ouvrir la vidéo : {video_path}")
+        raise IOError(f"Unable to open the video: {video_path}")
 
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
     frames = []
@@ -145,19 +145,19 @@ def _read_video_frames(video_path: Path) -> Tuple[List[np.ndarray], float]:
 
 def _load_ground_truth_masks(gt_dir: Path, num_frames: int) -> List[np.ndarray]:
     """
-    Charge les masques GT depuis un répertoire.
+    Load GT masks from a directory.
 
-    Supporte deux formats :
-      - Dossier d'images (PNG/JPG) triées par nom.
-      - Vidéo de masques (chaque frame = masque en niveaux de gris).
+    Supports two formats:
+      - Folder of images (PNG/JPG) sorted by name.
+      - Video of masks (each frame = a grayscale mask).
 
     Returns:
-        Liste de masques float32 [0, 1] de longueur min(disponible, num_frames).
+        List of float32 masks in [0, 1], of length min(available, num_frames).
     """
     masks = []
 
     if gt_dir.is_dir():
-        # Mode dossier d'images
+        # Image-folder mode
         image_exts = {".png", ".jpg", ".jpeg", ".bmp", ".tiff"}
         files = sorted(
             f for f in gt_dir.iterdir() if f.suffix.lower() in image_exts
@@ -167,7 +167,7 @@ def _load_ground_truth_masks(gt_dir: Path, num_frames: int) -> List[np.ndarray]:
             if img is not None:
                 masks.append(img.astype(np.float32) / 255.0)
     elif gt_dir.is_file():
-        # Mode vidéo de masques
+        # Mask-video mode
         cap = cv2.VideoCapture(str(gt_dir))
         while len(masks) < num_frames:
             ret, frame = cap.read()
@@ -177,14 +177,14 @@ def _load_ground_truth_masks(gt_dir: Path, num_frames: int) -> List[np.ndarray]:
             masks.append(gray.astype(np.float32) / 255.0)
         cap.release()
 
-    logger.info("GT chargé : %d masques depuis %s", len(masks), gt_dir)
+    logger.info("GT loaded: %d masks from %s", len(masks), gt_dir)
     return masks
 
 
 def _save_masks(masks: List[np.ndarray], output_dir: Path, start_idx: int = 0) -> None:
-    """Sauvegarde une liste de masques en PNG dans un répertoire via un pool de threads."""
+    """Save a list of masks as PNGs into a directory using a thread pool."""
     output_dir.mkdir(parents=True, exist_ok=True)
-    
+
     def _save_single(idx, mask):
         mask_u8 = (mask * 255).clip(0, 255).astype(np.uint8)
         cv2.imwrite(str(output_dir / f"mask_{idx:06d}.png"), mask_u8)
@@ -195,7 +195,7 @@ def _save_masks(masks: List[np.ndarray], output_dir: Path, start_idx: int = 0) -
 
 
 def _batched(iterable, n):
-    """Regroupe les éléments d'un itérable par lots de taille n."""
+    """Group the elements of an iterable into batches of size n."""
     it = iter(iterable)
     while True:
         batch = list(itertools.islice(it, n))
@@ -207,88 +207,88 @@ def _batched(iterable, n):
 import imageio
 
 def _save_segmented_masks(masks: List[np.ndarray], frames: List[np.ndarray], output_dir: Path) -> None:
-    """Sauvegarde les frames avec le sujet détouré sur fond noir."""
+    """Save frames with the subject cut out on a black background."""
     output_dir.mkdir(parents=True, exist_ok=True)
     for i, (mask, frame) in enumerate(zip(masks, frames)):
-        # Conversion robuste BGR(A)
+        # Robust BGR(A) conversion
         if len(frame.shape) == 3 and frame.shape[2] == 4:
             f_bgr = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
         else:
             f_bgr = frame
-            
+
         segmented = (f_bgr * mask.squeeze()[:, :, np.newaxis]).astype(np.uint8)
         cv2.imwrite(str(output_dir / f"segmented_{i:06d}.png"), segmented)
 
 
 def _save_segmented_video(
-    masks: List[np.ndarray], 
-    frames: List[np.ndarray], 
-    output_path: Path, 
+    masks: List[np.ndarray],
+    frames: List[np.ndarray],
+    output_path: Path,
     fps: float
 ) -> None:
-    """Compile une vidéo du sujet détouré sur fond noir de façon ultra-rapide."""
+    """Compile a video of the cut-out subject on a black background as fast as possible."""
     if not masks or not frames:
         return
-    
-    # Encoder haute performance (H.264) via imageio (utilise ffmpeg-static interne)
-    # On spécifie 'libx264' et une qualité raisonnable pour la vitesse
+
+    # High-performance encoder (H.264) via imageio (uses bundled ffmpeg-static)
+    # We specify 'libx264' with a reasonable speed/quality trade-off
     import sys
-    # Utiliser l'encodeur matériel sur Mac si possible
+    # Use the hardware encoder on Mac when possible
     codec = 'h264_videotoolbox' if sys.platform == 'darwin' else 'libx264'
-    
+
     writer = imageio.get_writer(
-        str(output_path), 
-        fps=fps, 
-        codec=codec, 
-        # quality=7 est remplacé par bitrate pour videotoolbox si nécessaire, 
-        # mais imageio tente de mapper quality vers les params ffmpeg.
+        str(output_path),
+        fps=fps,
+        codec=codec,
+        # quality=7 is replaced by bitrate for videotoolbox if needed,
+        # but imageio tries to map quality to the ffmpeg params.
         pixelformat='yuv420p',
         ffmpeg_log_level='error'
     )
-    
+
     for mask, frame in zip(masks, frames):
-        # Conversion BGR -> RGB
+        # BGR -> RGB conversion
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        
-        # Masque binaire pour éviter d'assombrir l'humain
+
+        # Binary mask to avoid darkening the person
         mask_binary = (mask.squeeze() > 0.5).astype(np.float32)
-        
-        # Détourage
+
+        # Cut-out
         segmented = (frame_rgb * mask_binary[:, :, np.newaxis]).astype(np.uint8)
         writer.append_data(segmented)
-    
+
     writer.close()
 
 
 def _save_masks_as_video_fast(masks: List[np.ndarray], output_path: Path, fps: float) -> None:
-    """Compile une vidéo des masques de façon ultra-rapide."""
+    """Compile a video of masks as fast as possible."""
     if not masks:
         return
-    
+
     import sys
     codec = 'h264_videotoolbox' if sys.platform == 'darwin' else 'libx264'
 
     writer = imageio.get_writer(
-        str(output_path), 
-        fps=fps, 
-        codec=codec, 
+        str(output_path),
+        fps=fps,
+        codec=codec,
         pixelformat='yuv420p',
         ffmpeg_log_level='error'
     )
-    
+
     for mask in masks:
-        # Squeeze pour s'assurer que c'est du (H, W) et non (H, W, 1)
+        # Squeeze to make sure it is (H, W) and not (H, W, 1)
         mask_2d = mask.squeeze()
         mask_u8 = (mask_2d * 255).astype(np.uint8)
-        # Convertir Gris -> RGB pour compatibilité H.264
+        # Convert grayscale -> RGB for H.264 compatibility
         mask_rgb = cv2.cvtColor(mask_u8, cv2.COLOR_GRAY2RGB)
         writer.append_data(mask_rgb)
-    
+
     writer.close()
 
 
 def _load_masks(masks_dir: Path) -> List[np.ndarray]:
-    """Recharge les masques sauvegardés depuis un répertoire."""
+    """Reload saved masks from a directory."""
     files = sorted(masks_dir.glob("mask_*.png"))
     masks = []
     for f in files:
@@ -299,7 +299,7 @@ def _load_masks(masks_dir: Path) -> List[np.ndarray]:
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  Étape 1 : Inférence
+#  Step 1: Inference
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def run_inference(
     model: BaseModelWrapper,
@@ -309,9 +309,9 @@ def run_inference(
     collect_masks: bool = True,
 ) -> Dict:
     """
-    Exécute l'inférence sur une vidéo en streaming avec prefetching et batching.
-    Collecte les masques pour l'évaluation ; la latence est mesurée séparément
-    par measure_latency() en conditions batch=1.
+    Run inference on a video with streaming prefetching and batching.
+    Collects masks for evaluation; latency is measured separately by
+    measure_latency() under batch=1 conditions.
     """
     total_frames = 0
     masks_in_ram = [] if collect_masks else None
@@ -320,7 +320,7 @@ def run_inference(
     input_shape = (3, h, w)
 
     model.reset_state()
-    logger.info("Inférence %s sur %s (prefetch actif)…", model.name, video_path.name)
+    logger.info("Inference %s on %s (prefetch active)…", model.name, video_path.name)
 
     prefetcher = VideoPrefetcher(video_path, queue_size=batch_size * 2).start()
 
@@ -343,7 +343,7 @@ def run_inference(
     prefetcher.stop()
 
     flops = model.get_flops(input_shape)
-    logger.info("%s — %d frames traitées | FLOPs: %.2e", model.name, total_frames, flops)
+    logger.info("%s — %d frames processed | FLOPs: %.2e", model.name, total_frames, flops)
 
     return {
         "flops_per_frame": flops,
@@ -359,20 +359,20 @@ def measure_latency(
     n_frames: int = LATENCY_N_FRAMES,
 ) -> Dict:
     """
-    Mesure la latence frame-à-frame en conditions réelles (batch=1).
+    Measure frame-by-frame latency under real conditions (batch=1).
 
-    Charge les (warmup_frames + n_frames) premières frames de la vidéo en RAM,
-    réinitialise l'état du modèle, effectue le warmup sans enregistrer, puis
-    chronomètre chaque appel predict_batch([frame]) individuellement.
-    Le modèle reste en régime établi tout au long (état récurrent préservé),
-    ce qui reflète la latence steady-state d'un pipeline streaming.
+    Loads the first (warmup_frames + n_frames) frames of the video into
+    RAM, resets the model state, runs the warmup without recording, then
+    times each predict_batch([frame]) call individually.
+    The model stays in steady state throughout (recurrent state preserved),
+    which reflects the steady-state latency of a streaming pipeline.
 
     Args:
-        warmup_frames: Nombre de frames de chauffe (non mesurées).
-        n_frames:      Nombre de frames effectivement chronométrées.
+        warmup_frames: Number of warm-up frames (not measured).
+        n_frames:      Number of frames actually timed.
 
     Returns:
-        Dict avec latency_p95_ms, latency_mean_ms, latency_std_ms.
+        Dict with latency_p95_ms, latency_mean_ms, latency_std_ms.
     """
     total_needed = warmup_frames + n_frames
     frames: List[np.ndarray] = []
@@ -386,14 +386,14 @@ def measure_latency(
 
     if len(frames) <= warmup_frames:
         logger.warning(
-            "measure_latency : vidéo trop courte (%d frames) pour %d warmup + %d mesures.",
+            "measure_latency: video too short (%d frames) for %d warmup + %d measurements.",
             len(frames), warmup_frames, n_frames,
         )
         return {"latency_p95_ms": 0.0, "latency_mean_ms": 0.0, "latency_std_ms": 0.0}
 
     model.reset_state()
     logger.info(
-        "Latence %s : %d warmup + %d mesures (batch=1)…",
+        "Latency %s: %d warmup + %d measurements (batch=1)…",
         model.name, warmup_frames, len(frames) - warmup_frames,
     )
 
@@ -410,7 +410,7 @@ def measure_latency(
     arr = np.array(latencies)
     p95 = float(np.percentile(arr, LATENCY_PERCENTILE))
     logger.info(
-        "%s — Latence p95: %.2f ms | Moyenne: %.2f ms",
+        "%s — p95 latency: %.2f ms | Mean: %.2f ms",
         model.name, p95, arr.mean(),
     )
     return {
@@ -421,7 +421,7 @@ def measure_latency(
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  Étape 2 : Évaluation
+#  Step 2: Evaluation
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def run_evaluation(
     masks_dir: Optional[Path],
@@ -430,13 +430,13 @@ def run_evaluation(
     masks: Optional[List[np.ndarray]] = None,
 ) -> Dict:
     """
-    Calcule les métriques vs GT.
-    Peut prendre soit un répertoire de masques (disque), soit une liste (RAM).
+    Compute the metrics vs. GT.
+    Accepts either a directory of masks (disk) or a list (RAM).
     """
     pred_masks = masks if masks else _load_masks(masks_dir)
 
     if not pred_masks:
-        logger.error("Aucun masque prédit trouvé dans %s", masks_dir)
+        logger.error("No predicted mask found in %s", masks_dir)
         return {
             "iou_mean": 0.0,
             "iou_std": 0.0,
@@ -445,14 +445,14 @@ def run_evaluation(
             "flow_warping_error": 0.0,
         }
 
-    logger.info("Évaluation : %d masques prédits vs %d GT", len(pred_masks), len(gt_masks))
+    logger.info("Evaluation: %d predicted masks vs. %d GT", len(pred_masks), len(gt_masks))
 
     frames_iter = _iter_video_frames(video_path) if video_path else None
-    
+
     metrics = compute_all_metrics(pred_masks, gt_masks, frames_iter)
 
     logger.info(
-        "Résultats — IoU: %.4f ± %.4f | BoundaryF: %.4f ± %.4f | FWE: %.4f",
+        "Results — IoU: %.4f ± %.4f | BoundaryF: %.4f ± %.4f | FWE: %.4f",
         metrics["iou_mean"],
         metrics["iou_std"],
         metrics["boundary_f_mean"],
@@ -464,26 +464,26 @@ def run_evaluation(
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  Découverte des vidéos et GT
+#  Video / GT discovery
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def discover_datasets(
     videos_dir: Path = VIDEOS_DIR,
     gt_dir: Path = GROUND_TRUTH_DIR,
 ) -> List[Tuple[Path, Path]]:
     """
-    Découvre les couples (vidéo, ground_truth).
+    Discover (video, ground_truth) pairs.
 
-    Convention de nommage :
+    Naming convention:
       - dataset/videos/video_001.mp4
-      - dataset/ground_truth/video_001/  (dossier de masques PNG)
-      OU
-      - dataset/ground_truth/video_001.mp4  (vidéo de masques)
+      - dataset/ground_truth/video_001/  (folder of PNG masks)
+      OR
+      - dataset/ground_truth/video_001.mp4  (video of masks)
 
     Returns:
-        Liste de tuples (video_path, gt_path).
+        List of (video_path, gt_path) tuples.
     """
     if not videos_dir.exists():
-        logger.warning("Dossier vidéos introuvable : %s", videos_dir)
+        logger.warning("Videos folder not found: %s", videos_dir)
         return []
 
     video_exts = {".mp4", ".avi", ".mov", ".mkv", ".webm"}
@@ -495,32 +495,32 @@ def discover_datasets(
 
         stem = video_file.stem
 
-        # Chercher le GT correspondant
+        # Look for the matching GT
         gt_folder = gt_dir / stem
         gt_video = gt_dir / f"{stem}.mp4"
         gt_video_avi = gt_dir / f"{stem}.avi"
 
         if gt_folder.is_dir():
             pairs.append((video_file, gt_folder))
-            logger.info("Dataset découvert : %s ↔ %s/", video_file.name, gt_folder.name)
+            logger.info("Dataset discovered: %s ↔ %s/", video_file.name, gt_folder.name)
         elif gt_video.is_file():
             pairs.append((video_file, gt_video))
-            logger.info("Dataset découvert : %s ↔ %s", video_file.name, gt_video.name)
+            logger.info("Dataset discovered: %s ↔ %s", video_file.name, gt_video.name)
         elif gt_video_avi.is_file():
             pairs.append((video_file, gt_video_avi))
-            logger.info("Dataset découvert : %s ↔ %s", video_file.name, gt_video_avi.name)
+            logger.info("Dataset discovered: %s ↔ %s", video_file.name, gt_video_avi.name)
         else:
             logger.warning(
-                "Pas de GT trouvé pour %s (cherché : %s/, %s, %s)",
+                "No GT found for %s (looked for: %s/, %s, %s)",
                 video_file.name, gt_folder, gt_video, gt_video_avi,
             )
 
-    logger.info("Total : %d couples (vidéo, GT) découverts.", len(pairs))
+    logger.info("Total: %d (video, GT) pairs discovered.", len(pairs))
     return pairs
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  Boucle principale
+#  Main loop
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def run_benchmark(
     models: List[BaseModelWrapper],
@@ -535,64 +535,65 @@ def run_benchmark(
     save_segmented: bool = False,
 ) -> List[Dict]:
     """
-    Exécute le benchmark complet pour tous les modèles sur toutes les vidéos.
+    Run the full benchmark for every model over every video.
 
     Args:
-        random_selection: Si True, sélectionne num_videos vidéos au hasard.
-        save_masks: Si True, stocke les masques binaires (PNG).
-        save_video: Si True, compile les masques binaires en vidéo (MP4).
-        save_segmented: Si True, stocke le sujet sur fond noir (images et vidéo).
+        random_selection: If True, pick num_videos videos at random.
+        save_masks: If True, store the binary masks (PNG).
+        save_video: If True, compile the binary masks into a video (MP4).
+        save_segmented: If True, store the subject on a black background
+                        (images and video).
     """
     import random
 
-    # Préparer les répertoires
+    # Prepare directories
     output_dir.mkdir(parents=True, exist_ok=True)
     temp_dir.mkdir(parents=True, exist_ok=True)
-    
+
     masks_final_dir = output_dir / "masks"
     if save_masks:
         masks_final_dir.mkdir(parents=True, exist_ok=True)
 
-    # Découvrir les datasets
+    # Discover datasets
     datasets = discover_datasets(videos_dir, gt_dir)
     if not datasets:
         logger.error(
-            "Aucun dataset trouvé. Vérifie que des vidéos sont dans %s "
-            "et des GT correspondants dans %s.",
+            "No dataset found. Make sure there are videos in %s "
+            "and matching GT in %s.",
             videos_dir, gt_dir,
         )
         return []
 
-    # Sélection du nombre de vidéos
+    # Select the number of videos
     if random_selection:
         random.shuffle(datasets)
-    
+
     if num_videos is not None:
         datasets = datasets[:num_videos]
-        logger.info("Traitement de %d vidéos (sélection %s).", 
-                    len(datasets), "aléatoire" if random_selection else "ordonnée")
+        logger.info("Processing %d videos (%s selection).",
+                    len(datasets), "random" if random_selection else "ordered")
 
     all_results = []
     total_combos = len(models) * len(datasets)
 
     logger.info("=" * 72)
     logger.info(
-        "BENCHMARK : %d modèle(s) × %d vidéo(s) = %d combinaisons",
+        "BENCHMARK: %d model(s) × %d video(s) = %d combinations",
         len(models), len(datasets), total_combos,
     )
     logger.info("=" * 72)
 
     for model in models:
         logger.info("─" * 72)
-        logger.info("Modèle : %s", model.name)
+        logger.info("Model: %s", model.name)
         logger.info("─" * 72)
 
-        # Charger le modèle
+        # Load the model
         try:
             model.load()
         except Exception as e:
-            logger.error("Échec du chargement de %s : %s", model.name, e)
-            # Enregistrer un résultat d'erreur pour chaque vidéo
+            logger.error("Failed to load %s: %s", model.name, e)
+            # Record an error result for each video
             for video_path, _ in datasets:
                 all_results.append({
                     "model": model.name,
@@ -603,7 +604,7 @@ def run_benchmark(
             continue
 
         for video_path, gt_path in datasets:
-            logger.info("\n📹 Vidéo : %s", video_path.name)
+            logger.info("\n📹 Video: %s", video_path.name)
             result_entry = {
                 "model": model.name,
                 "video": video_path.name,
@@ -611,22 +612,22 @@ def run_benchmark(
             }
 
             try:
-                # ── Infos vidéo ──
+                # ── Video info ──
                 num_frames, fps, (w_h) = _get_video_info(video_path)
                 result_entry["fps_source"] = fps
                 result_entry["resolution"] = f"{w_h[0]}x{w_h[1]}"
 
-                # ── Charger le GT ──
+                # ── Load the GT ──
                 gt_masks = _load_ground_truth_masks(gt_path, num_frames)
                 if not gt_masks:
-                    logger.warning("Pas de GT disponible pour %s.", video_path.name)
+                    logger.warning("No GT available for %s.", video_path.name)
 
-                # ── Étape 1 : Inférence (Streaming + Prefetch) ──
-                # On évite d'écrire sur disque si on ne veut que les métriques
+                # ── Step 1: Inference (streaming + prefetch) ──
+                # Avoid writing to disk if we only care about the metrics
                 masks_output = temp_dir / f"{model.name.replace(' ', '_')}_{video_path.stem}"
-                
-                # Si save_masks est False, on ne passe pas de masks_output à run_inference
-                # mais on demande de collecter les masques en RAM pour l'évaluation.
+
+                # If save_masks is False we don't pass masks_output to run_inference,
+                # but we still ask it to collect masks in RAM for evaluation.
                 inference_result = run_inference(
                     model,
                     video_path,
@@ -644,11 +645,11 @@ def run_benchmark(
                     "num_frames": inference_result["num_frames"],
                 })
 
-                # ── Étape 2 : Évaluation (RAM ou Disque) ──
+                # ── Step 2: Evaluation (RAM or disk) ──
                 if gt_masks:
                     eval_result = run_evaluation(
-                        masks_output if save_masks else None, 
-                        gt_masks, 
+                        masks_output if save_masks else None,
+                        gt_masks,
                         video_path,
                         masks=inference_result.get("masks")
                     )
@@ -668,53 +669,53 @@ def run_benchmark(
                         "flow_warping_error": None,
                     })
 
-                # ── Sauvegarde permanente si demandée ──
+                # ── Permanent saving if requested ──
                 if save_masks or save_video or save_segmented:
                     dest_base = masks_final_dir / model.name.replace(" ", "_") / video_path.stem
                     dest_base.mkdir(parents=True, exist_ok=True)
-                    
-                    # Utiliser les masques en RAM si l'écriture disque a été bypassée
+
+                    # Use the masks in RAM if disk writes were bypassed
                     m_temp = inference_result.get("masks")
                     if not m_temp or len(m_temp) == 0:
                         m_temp = _load_masks(masks_output)
 
                     if save_masks:
                         _save_masks(m_temp, dest_base)
-                        logger.info("💾 Masques PNG sauvegardés dans : %s", dest_base)
-                        
+                        logger.info("💾 PNG masks saved to: %s", dest_base)
+
                     if save_video:
                         video_out_path = dest_base.parent / f"{video_path.stem}_{model.name.replace(' ', '_')}_mask.mp4"
                         _save_masks_as_video_fast(m_temp, video_out_path, fps)
-                        logger.info("🎬 Vidéo masque sauvegardée : %s", video_out_path)
+                        logger.info("🎬 Mask video saved: %s", video_out_path)
 
                     if save_segmented:
-                        # Lire les frames à nouveau pour le détourage
+                        # Re-read the frames for the cut-out
                         frames_list, _ = _read_video_frames(video_path)
                         seg_video_path = dest_base.parent / f"{video_path.stem}_{model.name.replace(' ', '_')}_segmented.mp4"
                         _save_segmented_video(m_temp, frames_list, seg_video_path, fps)
-                        logger.info("🎨 Vidéo détourée sauvegardée : %s", seg_video_path)
+                        logger.info("🎨 Cut-out video saved: %s", seg_video_path)
 
-                # ── Nettoyage des masques temporaires ──
+                # ── Clean up temporary masks ──
                 if masks_output.exists():
                     shutil.rmtree(masks_output)
-                    logger.info("🗑️  Masques temporaires supprimés : %s", masks_output)
+                    logger.info("🗑️  Temporary masks removed: %s", masks_output)
 
             except Exception as e:
-                logger.error("Erreur pour %s / %s : %s", model.name, video_path.name, e)
+                logger.error("Error for %s / %s: %s", model.name, video_path.name, e)
                 result_entry["status"] = "ERROR"
                 result_entry["error"] = str(e)
 
             all_results.append(result_entry)
 
-        # Libérer le modèle
+        # Release the model
         model.cleanup()
 
-    # ── Générer les rapports ──
+    # ── Generate the reports ──
     _save_csv_report(all_results, output_dir)
     _save_json_report(all_results, output_dir)
 
     logger.info("=" * 72)
-    logger.info("✅ BENCHMARK TERMINÉ — %d résultats enregistrés.", len(all_results))
+    logger.info("✅ BENCHMARK COMPLETE — %d results recorded.", len(all_results))
     logger.info("   CSV  : %s", output_dir / RESULTS_CSV_FILENAME)
     logger.info("   JSON : %s", output_dir / RESULTS_JSON_FILENAME)
     logger.info("=" * 72)
@@ -723,10 +724,10 @@ def run_benchmark(
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  Génération de rapports
+#  Report generation
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def _save_csv_report(results: List[Dict], output_dir: Path) -> None:
-    """Sauvegarde les résultats en CSV."""
+    """Save the results as CSV."""
     if not results:
         return
 
@@ -756,17 +757,17 @@ def _save_csv_report(results: List[Dict], output_dir: Path) -> None:
         for row in results:
             writer.writerow(row)
 
-    logger.info("Rapport CSV sauvegardé : %s", csv_path)
+    logger.info("CSV report saved: %s", csv_path)
 
 
 def _save_json_report(results: List[Dict], output_dir: Path) -> None:
-    """Sauvegarde les résultats en JSON (plus riche, inclut les métadonnées)."""
+    """Save the results as JSON (richer, includes metadata)."""
     if not results:
         return
 
     json_path = output_dir / RESULTS_JSON_FILENAME
 
-    # Nettoyer les valeurs non-sérialisables
+    # Clean up non-serialisable values
     clean_results = []
     for r in results:
         clean = {}
@@ -790,4 +791,4 @@ def _save_json_report(results: List[Dict], output_dir: Path) -> None:
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(report, f, indent=2, ensure_ascii=False)
 
-    logger.info("Rapport JSON sauvegardé : %s", json_path)
+    logger.info("JSON report saved: %s", json_path)
