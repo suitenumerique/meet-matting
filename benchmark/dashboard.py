@@ -544,17 +544,27 @@ with tab3:
     )
 
     # Build index of available (model, video_stem) pairs
+    # Accepts both *_mask.mp4 (save_video=True) and *_segmented.mp4 (save_segmented=True)
     masks_root3 = OUTPUT_DIR / "masks"
     pairs_index: dict = {}  # model_dir_name → list[video_stem]
     if masks_root3.is_dir():
         for md in sorted(masks_root3.iterdir()):
-            if md.is_dir():
-                stems = sorted(
-                    f.stem.replace(f"_{md.name}_mask", "")
-                    for f in md.glob("*_mask.mp4")
-                )
-                if stems:
-                    pairs_index[md.name] = stems
+            if not md.is_dir():
+                continue
+            mask_stems = sorted(
+                f.stem.replace(f"_{md.name}_mask", "")
+                for f in md.glob("*_mask.mp4")
+            )
+            if mask_stems:
+                pairs_index[md.name] = mask_stems
+                continue
+            # Fallback: derive stems from segmented videos
+            seg_stems = sorted(
+                f.stem.replace(f"_{md.name}_segmented", "")
+                for f in md.glob("*_segmented.mp4")
+            )
+            if seg_stems:
+                pairs_index[md.name] = seg_stems
 
     if not pairs_index:
         st.warning("Aucun masque trouvé. Lancez d'abord un benchmark.")
@@ -577,13 +587,13 @@ with tab3:
             src_path  = curr_videos_dir / f"{chosen_video}.mp4"
             gt_path   = curr_gt_dir / f"{chosen_video}.mp4"
             mask_path = masks_root3 / chosen_model / f"{chosen_video}_{chosen_model}_mask.mp4"
+            seg_path  = masks_root3 / chosen_model / f"{chosen_video}_{chosen_model}_segmented.mp4"
 
-            # Frame count (use source video as reference)
+            # Reference video for frame count
+            ref_path = mask_path if mask_path.exists() else (seg_path if seg_path.exists() else src_path)
             n_frames_vis = 1
-            if src_path.exists():
-                n_frames_vis, _, _ = _get_video_info(src_path)
-            elif mask_path.exists():
-                n_frames_vis, _, _ = _get_video_info(mask_path)
+            if ref_path.exists():
+                n_frames_vis, _, _ = _get_video_info(ref_path)
 
             frame_idx = st.slider(
                 "Numéro de frame",
@@ -593,10 +603,24 @@ with tab3:
                 key="t3_frame",
             )
 
-            # Load the 3 images on demand
-            img_src  = get_frame_at(src_path, frame_idx)  if src_path.exists()  else None
-            img_mask = get_frame_at(mask_path, frame_idx) if mask_path.exists() else None
-            img_gt_raw = get_frame_at(gt_path, frame_idx)  if gt_path.exists()   else None
+            # Load source and GT
+            img_src    = get_frame_at(src_path, frame_idx) if src_path.exists() else None
+            img_gt_raw = get_frame_at(gt_path,  frame_idx) if gt_path.exists()  else None
+
+            # Load predicted mask: prefer *_mask.mp4, fallback to *_segmented.mp4
+            img_mask = None
+            mask_source = ""
+            if mask_path.exists():
+                img_mask = get_frame_at(mask_path, frame_idx)
+                mask_source = "mask"
+            elif seg_path.exists():
+                seg_frame = get_frame_at(seg_path, frame_idx)
+                if seg_frame is not None:
+                    # Derive mask: non-black pixels → foreground
+                    seg_rgb = cv2.cvtColor(seg_frame, cv2.COLOR_BGR2RGB)
+                    derived = (np.any(seg_rgb > 10, axis=2).astype(np.uint8) * 255)
+                    img_mask = cv2.cvtColor(derived, cv2.COLOR_GRAY2BGR)
+                    mask_source = "segmented"
 
             # Convert GT to mask
             img_gt_mask = None
@@ -619,7 +643,8 @@ with tab3:
                     st.warning("Vidéo source introuvable.")
 
             with c_pred:
-                st.markdown("**Masque prédit**")
+                label = "**Masque prédit**" + (" *(dérivé du segmenté)*" if mask_source == "segmented" else "")
+                st.markdown(label)
                 if img_mask is not None:
                     gray_pred = cv2.cvtColor(img_mask, cv2.COLOR_BGR2GRAY)
                     st.image(gray_pred, width='stretch', clamp=True)
