@@ -146,11 +146,14 @@ class _BaseMediapipeWrapper(BaseModelWrapper):
             logger.warning("%s: no mask returned, returning empty mask.", self.name)
             mask = np.zeros((h_orig, w_orig), dtype=np.float32)
 
+        # Ensure 2D (numpy_view can return H×W×1)
+        mask = mask.squeeze()
+
         # Resize back to the original size
         if mask.shape[:2] != (h_orig, w_orig):
             mask = cv2.resize(mask, (w_orig, h_orig), interpolation=cv2.INTER_LINEAR)
 
-        return mask
+        return mask.astype(np.float32)
 
     def get_flops(self, input_shape: Tuple[int, int, int] = (3, 256, 256)) -> float:
         # MediaPipe TFLite: no direct FLOPs counting.

@@ -1,0 +1,29 @@
+[project]
+name = "background-segmentation-benchmark"
+version = "1.0.0"
+description = "Video matting benchmark: MediaPipe, RVM, MobileNetV3 and more"
+requires-python = ">=3.11"
+dependencies = [
+    # Core
+    "numpy>=1.24.0",
+    "opencv-python>=4.8.0",
+    "tqdm>=4.65.0",
+    # Deep Learning
+    "torch>=2.0.0",
+    "torchvision>=0.15.0",
+    # Inference
+    "onnxruntime>=1.16.0",
+    # MediaPipe
+    "mediapipe>=0.10.0",
+    # FLOPs
+    "fvcore>=0.1.5",
+    # Video I/O
+    "imageio>=2.30.0",
+    "imageio-ffmpeg>=0.4.0",
+    # Dashboard
+    "streamlit>=1.25.0",
+    "pandas>=2.0.0",
+]
+
+[tool.uv]
+dev-dependencies = []
