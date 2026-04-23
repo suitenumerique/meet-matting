@@ -704,6 +704,7 @@ def run_benchmark(
     save_segmented: bool = False,
     progress_callback: Optional[Callable[[int, int, str], None]] = None,
     on_result: Optional[Callable[[Dict], None]] = None,
+    analyze_thresholds: bool = False,
 ) -> List[Dict]:
     """
     Exécute le benchmark complet pour tous les modèles sur toutes les vidéos.
@@ -823,8 +824,8 @@ def run_benchmark(
                 # ── Étape 2 : Évaluation (RAM ou Disque) ──
                 if gt_masks:
                     eval_result = run_evaluation(
-                        masks_output if save_masks else None, 
-                        gt_masks, 
+                        masks_output if save_masks else None,
+                        gt_masks,
                         video_path,
                         masks=inference_result.get("masks")
                     )
@@ -835,6 +836,23 @@ def run_benchmark(
                         "boundary_f_std": round(eval_result["boundary_f_std"], 4),
                         "flow_warping_error": round(eval_result["flow_warping_error"], 4),
                     })
+
+                    # ── Threshold sensitivity analysis ──────────────────────
+                    if analyze_thresholds and inference_result.get("masks"):
+                        pred_masks_all = inference_result["masks"]
+                        n_th = min(len(pred_masks_all), len(gt_masks))
+                        th_range = [round(t * 0.1, 1) for t in range(1, 10)]
+                        th_analysis: Dict[str, Dict] = {}
+                        for t in th_range:
+                            th_m = compute_all_metrics(
+                                pred_masks_all[:n_th], gt_masks[:n_th],
+                                frames=None, threshold=t,
+                            )
+                            th_analysis[str(t)] = {
+                                "iou_mean": round(th_m["iou_mean"], 4),
+                                "boundary_f_mean": round(th_m["boundary_f_mean"], 4),
+                            }
+                        result_entry["threshold_analysis"] = th_analysis
                 else:
                     result_entry.update({
                         "iou_mean": None,
@@ -1144,7 +1162,12 @@ def compute_metrics_on_output(
 #  Report generation
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def _save_csv_report(results: List[Dict], output_dir: Path) -> None:
-    """Sauvegarde les résultats en CSV."""
+    """Sauvegarde les résultats en CSV.
+
+    Si un résultat contient threshold_analysis (benchmark lancé avec
+    analyze_thresholds=True), il est explosé en N lignes — une par seuil
+    testé. Sinon une ligne par (modèle, vidéo) avec threshold=0.5 (défaut).
+    """
     if not results:
         return
 
@@ -1152,6 +1175,7 @@ def _save_csv_report(results: List[Dict], output_dir: Path) -> None:
     fieldnames = [
         "model",
         "video",
+        "threshold",
         "status",
         "resolution",
         "fps_source",
@@ -1161,17 +1185,35 @@ def _save_csv_report(results: List[Dict], output_dir: Path) -> None:
         "latency_std_ms",
         "flops_per_frame",
         "iou_mean",
-        "iou_std",
         "boundary_f_mean",
         "boundary_f_std",
         "flow_warping_error",
         "error",
     ]
 
+    rows: List[Dict] = []
+    for r in results:
+        ta = r.get("threshold_analysis")
+        base = {k: v for k, v in r.items() if k != "threshold_analysis"}
+
+        if ta:
+            # One row per threshold value
+            for t_str, metrics in sorted(ta.items(), key=lambda x: float(x[0])):
+                row = {
+                    **base,
+                    "threshold": float(t_str),
+                    "iou_mean": metrics["iou_mean"],
+                    "boundary_f_mean": metrics["boundary_f_mean"],
+                }
+                rows.append(row)
+        else:
+            row = {**base, "threshold": base.get("threshold", 0.5)}
+            rows.append(row)
+
     with open(csv_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
-        for row in results:
+        for row in rows:
             writer.writerow(row)
 
     logger.info("Rapport CSV sauvegardé : %s", csv_path)

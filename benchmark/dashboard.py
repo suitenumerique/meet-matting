@@ -104,6 +104,64 @@ METRIC_GUIDE = """
 """
 
 
+def _threshold_sensitivity_chart(results: list):
+    """Display IoU and Boundary F curves vs binarization threshold per model."""
+    try:
+        import altair as alt
+    except ImportError:
+        st.info("Altair non disponible.")
+        return
+
+    rows = []
+    for r in results:
+        ta = r.get("threshold_analysis")
+        if not ta:
+            continue
+        for t_str, metrics in ta.items():
+            rows.append({
+                "model": r.get("model", ""),
+                "threshold": float(t_str),
+                "IoU": metrics.get("iou_mean", 0),
+                "Boundary F": metrics.get("boundary_f_mean", 0),
+            })
+
+    if not rows:
+        st.info("Aucune analyse de seuil disponible.")
+        return
+
+    df_th = pd.DataFrame(rows).groupby(["model", "threshold"]).mean(numeric_only=True).reset_index()
+
+    # Optimal threshold table
+    idx_best_iou = df_th.groupby("model")["IoU"].idxmax()
+    best = df_th.loc[idx_best_iou, ["model", "threshold", "IoU", "Boundary F"]].copy()
+    best.columns = ["Modèle", "Seuil optimal (IoU)", "IoU max", "Boundary F au seuil optimal"]
+    st.subheader("🎯 Seuil optimal par modèle")
+    st.table(best.reset_index(drop=True))
+
+    base = alt.Chart(df_th)
+    chart_iou = (
+        base.mark_line(point=True)
+        .encode(
+            x=alt.X("threshold:Q", title="Seuil de binarisation", scale=alt.Scale(domain=[0.1, 0.9])),
+            y=alt.Y("IoU:Q", title="IoU moyen", scale=alt.Scale(zero=False)),
+            color=alt.Color("model:N", title="Modèle"),
+            tooltip=["model", "threshold", "IoU", "Boundary F"],
+        )
+        .properties(title="IoU vs Seuil", height=280)
+    )
+    chart_bf = (
+        base.mark_line(point=True)
+        .encode(
+            x=alt.X("threshold:Q", title="Seuil de binarisation", scale=alt.Scale(domain=[0.1, 0.9])),
+            y=alt.Y("Boundary F:Q", title="Boundary F moyen", scale=alt.Scale(zero=False)),
+            color=alt.Color("model:N", title="Modèle"),
+            tooltip=["model", "threshold", "IoU", "Boundary F"],
+        )
+        .properties(title="Boundary F vs Seuil", height=280)
+    )
+    st.altair_chart(chart_iou | chart_bf, use_container_width=True)
+
+
 def _styled_df(df: pd.DataFrame):
     """Apply highlight styling to a results DataFrame."""
     cols = [c for c in df.columns if c in DISPLAY_COLS]
@@ -318,6 +376,16 @@ with tab1:
         save_video    = st.checkbox("Sauvegarder masques (.mp4)", value=False, key="t1_video")
         save_segmented = st.checkbox("Sauvegarder sujet (.mp4)", value=True, key="t1_seg")
 
+        st.divider()
+        st.subheader("🔬 Analyse avancée")
+        analyze_thresholds = st.checkbox(
+            "Analyser tous les seuils (0.1 → 0.9)",
+            value=False,
+            key="t1_thresh_analysis",
+            help="Calcule IoU et Boundary F pour 9 seuils de binarisation. "
+                 "Augmente la durée du benchmark (~×2 pour les métriques).",
+        )
+
     # ── Model selection ──
     col_models, col_run = st.columns([1, 2])
 
@@ -398,6 +466,7 @@ with tab1:
                     save_video=save_video,
                     save_segmented=save_segmented,
                     on_result=_on_result_t1,
+                    analyze_thresholds=analyze_thresholds,
                 )
                 elapsed = time.time() - t_start
                 status_box.update(label=f"✅ Terminé en {elapsed:.1f}s", state="complete")
@@ -422,6 +491,14 @@ with tab1:
 
                 st.subheader("⚡ Qualité vs Latence")
                 _scatter_chart(df)
+
+                if analyze_thresholds and any(r.get("threshold_analysis") for r in results):
+                    st.subheader("🔬 Sensibilité au seuil de binarisation")
+                    st.markdown(
+                        "Évolution de l'IoU et du Boundary F en fonction du seuil de "
+                        "binarisation — utile pour identifier le seuil optimal par modèle."
+                    )
+                    _threshold_sensitivity_chart(results)
             else:
                 st.warning("Aucun résultat. Vérifiez le dataset.")
 
