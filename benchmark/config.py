@@ -1,49 +1,58 @@
 """
-Centralized configuration for the benchmark.
+Configuration centralisée pour le benchmark.
 
-Defines paths, default thresholds and global parameters.
+Définit les chemins, les seuils par défaut et les paramètres globaux.
 """
 
 import os
 from pathlib import Path
 
 # ──────────────────────────────────────────────
-# Paths
+# Chemins
 # ──────────────────────────────────────────────
 BENCHMARK_ROOT = Path(os.path.dirname(os.path.abspath(__file__)))
-DATASET_DIR = BENCHMARK_ROOT / "dataset"
-VIDEOS_DIR = DATASET_DIR / "videos"
-GROUND_TRUTH_DIR = DATASET_DIR / "ground_truth"
+
+# Datasets disponibles
+DATASETS = {
+    "Synthetic (Fond Faux)": BENCHMARK_ROOT / "dataset",
+    "Real (Vidéos Masques)": BENCHMARK_ROOT / "videos_masques"
+}
+
+# Par défaut, on utilise le premier dataset
+DEFAULT_DATASET_DIR = DATASETS["Synthetic (Fond Faux)"]
+
+# Chemins dynamiques (seront mis à jour par le runner si besoin, 
+# mais on garde ces variables pour la compatibilité descendante)
+VIDEOS_DIR = DEFAULT_DATASET_DIR / "videos"
+GROUND_TRUTH_DIR = DEFAULT_DATASET_DIR / "ground_truth"
+
 TEMP_RESULTS_DIR = BENCHMARK_ROOT / "temp_results"
 OUTPUT_DIR = BENCHMARK_ROOT / "output"
 
+
 # ──────────────────────────────────────────────
-# Inference parameters
+# Paramètres d'inférence
 # ──────────────────────────────────────────────
-# Target resolution for the models (H, W). None = native resolution.
+# Résolution cible pour les modèles (H, W). None = résolution native.
 DEFAULT_INPUT_SIZE = (256, 256)
 
-# Number of warm-up frames ignored for latency measurement (main pass)
+# Nombre de frames de warm-up ignorées pour la mesure de latence
 WARMUP_FRAMES = 5
 
-# Percentile used for latency
+# Percentile pour la latence
 LATENCY_PERCENTILE = 95
 
-# Dedicated latency pass (batch=1, real frames)
-LATENCY_WARMUP_FRAMES = 20   # warm-up frames, not measured
-LATENCY_N_FRAMES = 50        # frames actually timed
-
-# Binarization threshold for masks (for models producing alpha mattes)
+# Seuil de binarisation des masques (pour les modèles produisant des alpha mattes)
 MASK_THRESHOLD = 0.5
 
 # ──────────────────────────────────────────────
-# Metric parameters
+# Paramètres des métriques
 # ──────────────────────────────────────────────
-# Radius in pixels for the Boundary F-measure
+# Rayon en pixels pour le Boundary F-measure
 BOUNDARY_TOLERANCE_PX = 3
 
 # ──────────────────────────────────────────────
-# Report
+# Rapport
 # ──────────────────────────────────────────────
 RESULTS_CSV_FILENAME = "benchmark_results.csv"
 RESULTS_JSON_FILENAME = "benchmark_results.json"

@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-CLI entry point for the Video Matting benchmark.
+Point d'entrée CLI pour le benchmark de Video Matting.
 
-Usage:
-  python -m benchmark.run_benchmark                   # All models
-  python -m benchmark.run_benchmark --models rvm modnet  # Specific models
-  python -m benchmark.run_benchmark --list-models      # List models
-  python -m benchmark.run_benchmark --videos-dir /path  # Custom directory
+Usage :
+  python -m benchmark.run_benchmark                   # Tous les modèles
+  python -m benchmark.run_benchmark --models rvm modnet  # Modèles spécifiques
+  python -m benchmark.run_benchmark --list-models      # Lister les modèles
+  python -m benchmark.run_benchmark --videos-dir /path  # Répertoire custom
 
-Examples:
-  # Full benchmark
+Exemples :
+  # Benchmark complet
   cd background-segmentation
   python -m benchmark.run_benchmark
 
-  # Only MediaPipe and RVM
+  # Seulement MediaPipe et RVM
   python -m benchmark.run_benchmark --models mediapipe_portrait rvm
 """
 
@@ -35,7 +35,7 @@ from .runner import run_benchmark
 
 
 def setup_logging(level: str = LOG_LEVEL) -> None:
-    """Configure logging with timestamped format + colours via StreamHandler."""
+    """Configure le logging avec format horodaté + couleurs via StreamHandler."""
     logging.basicConfig(
         level=getattr(logging, level.upper(), logging.INFO),
         format=LOG_FORMAT,
@@ -45,10 +45,10 @@ def setup_logging(level: str = LOG_LEVEL) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="🎬 Video Matting model benchmark",
+        description="🎬 Benchmark de modèles de Video Matting",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-Available models:
+Modèles disponibles :
   mediapipe_portrait          MediaPipe Portrait Segmenter
   mediapipe_selfie_multiclass MediaPipe Selfie Multiclass
   mediapipe_landscape         MediaPipe Landscape Segmenter
@@ -66,62 +66,62 @@ Available models:
         nargs="+",
         choices=list(MODEL_REGISTRY.keys()),
         default=None,
-        help="Models to benchmark (default: all).",
+        help="Modèles à benchmarker (défaut : tous).",
     )
     parser.add_argument(
         "--list-models",
         action="store_true",
-        help="Display the list of available models and exit.",
+        help="Affiche la liste des modèles disponibles et quitte.",
     )
     parser.add_argument(
         "--videos-dir",
         type=Path,
         default=VIDEOS_DIR,
-        help=f"Directory with source videos (default: {VIDEOS_DIR}).",
+        help=f"Répertoire des vidéos sources (défaut : {VIDEOS_DIR}).",
     )
     parser.add_argument(
         "--gt-dir",
         type=Path,
         default=GROUND_TRUTH_DIR,
-        help=f"Directory with Ground Truth (default: {GROUND_TRUTH_DIR}).",
+        help=f"Répertoire du Ground Truth (défaut : {GROUND_TRUTH_DIR}).",
     )
     parser.add_argument(
         "--output-dir",
         type=Path,
         default=OUTPUT_DIR,
-        help=f"Output directory for reports (default: {OUTPUT_DIR}).",
+        help=f"Répertoire de sortie des rapports (défaut : {OUTPUT_DIR}).",
     )
     parser.add_argument(
         "--num-videos",
         type=int,
         default=None,
-        help="Maximum number of videos to process (default: all).",
+        help="Nombre maximum de vidéos à traiter (défaut : toutes).",
     )
     parser.add_argument(
         "--shuffle",
         action="store_true",
-        help="Select videos randomly if --num-videos is used.",
+        help="Sélectionne les vidéos aléatoirement si --num-videos est utilisé.",
     )
     parser.add_argument(
         "--save-masks",
         action="store_true",
-        help="Save output masks to output/masks/ (PNG images).",
+        help="Sauvegarde les masques de sortie dans le dossier output/masks/ (images PNG).",
     )
     parser.add_argument(
         "--save-video",
         action="store_true",
-        help="Compile and save output masks as MP4 video.",
+        help="Compile et sauvegarde les masques de sortie en vidéo MP4.",
     )
     parser.add_argument(
         "--save-segmented",
         action="store_true",
-        help="Apply the mask to the source video and save the subject on a black background.",
+        help="Applique le masque sur la vidéo source et sauvegarde le sujet sur fond noir.",
     )
     parser.add_argument(
         "--log-level",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
         default=LOG_LEVEL,
-        help=f"Log level (default: {LOG_LEVEL}).",
+        help=f"Niveau de log (défaut : {LOG_LEVEL}).",
     )
 
     return parser.parse_args()
@@ -132,42 +132,42 @@ def main() -> None:
     setup_logging(args.log_level)
     logger = logging.getLogger(__name__)
 
-    # ── List models ──
+    # ── Lister les modèles ──
     if args.list_models:
-        print("\n📋 Available models:\n")
+        print("\n📋 Modèles disponibles :\n")
         for key, cls in MODEL_REGISTRY.items():
             instance = cls()
             print(f"  {key:<30s}  →  {instance.name}")
         print()
         sys.exit(0)
 
-    # ── Model selection ──
+    # ── Sélection des modèles ──
     model_keys = args.models or list(MODEL_REGISTRY.keys())
     models = []
     for key in model_keys:
         if key not in MODEL_REGISTRY:
-            logger.error("Unknown model: '%s'", key)
+            logger.error("Modèle inconnu : '%s'", key)
             sys.exit(1)
         models.append(MODEL_REGISTRY[key]())
 
-    logger.info("Selected models: %s", [m.name for m in models])
+    logger.info("Modèles sélectionnés : %s", [m.name for m in models])
 
-    # ── Checks ──
+    # ── Vérifications ──
     if not args.videos_dir.exists():
-        logger.error("Videos directory not found: %s", args.videos_dir)
-        logger.info("Create the folder and add MP4 videos inside.")
+        logger.error("Répertoire vidéos introuvable : %s", args.videos_dir)
+        logger.info("Crée le dossier et ajoute des vidéos MP4 dedans.")
         args.videos_dir.mkdir(parents=True, exist_ok=True)
         sys.exit(1)
 
     if not args.gt_dir.exists():
         logger.warning(
-            "GT directory not found: %s — quality metrics "
-            "will not be computed.",
+            "Répertoire GT introuvable : %s — les métriques de qualité "
+            "ne seront pas calculées.",
             args.gt_dir,
         )
         args.gt_dir.mkdir(parents=True, exist_ok=True)
 
-    # ── Run the benchmark ──
+    # ── Lancer le benchmark ──
     results = run_benchmark(
         models=models,
         videos_dir=args.videos_dir,
@@ -182,21 +182,21 @@ def main() -> None:
     )
 
     if not results:
-        logger.warning("No results produced. Check your data.")
+        logger.warning("Aucun résultat produit. Vérifie tes données.")
         sys.exit(1)
 
-    # Summary
+    # Résumé final
     print("\n" + "=" * 72)
-    print("📊 BENCHMARK SUMMARY")
+    print("📊 RÉSUMÉ DU BENCHMARK")
     print("=" * 72)
 
-    header = f"{'Model':<30s} {'Video':<20s} {'IoU':>8s} {'BndF':>8s} {'FWE':>8s} {'p95(ms)':>10s} {'FLOPs':>12s}"
+    header = f"{'Modèle':<30s} {'Vidéo':<20s} {'IoU':>8s} {'BndF':>8s} {'FWE':>8s} {'p95(ms)':>10s} {'FLOPs':>12s}"
     print(header)
     print("─" * len(header))
 
     for r in results:
         if r.get("status") != "OK":
-            print(f"{'⚠ ' + r['model']:<30s} {r.get('video', 'N/A'):<20s}  {'ERROR':>8s}")
+            print(f"{'⚠ ' + r['model']:<30s} {r.get('video', 'N/A'):<20s}  {'ERREUR':>8s}")
             continue
 
         iou = f"{r.get('iou_mean', 0):.4f}" if r.get("iou_mean") is not None else "N/A"
@@ -212,7 +212,7 @@ def main() -> None:
         )
 
     print("=" * 72)
-    print(f"📁 Reports: {args.output_dir}/")
+    print(f"📁 Rapports : {args.output_dir}/")
     print()
 
 

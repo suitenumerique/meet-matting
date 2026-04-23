@@ -1,25 +1,70 @@
 """
-Quality metric computation for Video Matting.
+Fonctions de calcul des métriques de qualité pour le Video Matting.
 
-Implemented metrics:
+Métriques implémentées :
   - IoU (Intersection over Union)
-  - Boundary F-measure (F1 on contours)
-  - Flow Warping Error (temporal stability)
+  - Boundary F-measure (F1 sur les contours)
+  - Flow Warping Error (stabilité temporelle)
 """
 
 import logging
-from typing import Iterable, List, Optional, Tuple
+import gc
+from typing import Iterable, List, Optional, Tuple, Generator
 
 import cv2
 import numpy as np
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from functools import partial
 
-# Default bound_ratio (DAVIS rule): the contour-matching tolerance is
-# 0.8% of the image diagonal (~2 px at 480p, ~4 px at 1080p).
+# bound_ratio par défaut (règle DAVIS) : la tolérance de matching de contour
+# est 0.8% de la diagonale de l'image (~2 px à 480p, ~4 px à 1080p).
 DEFAULT_BOUND_RATIO = 0.008
 
 logger = logging.getLogger(__name__)
+
+def _align_masks(pred_bin: np.ndarray, gt_bin: np.ndarray, max_shift: int = 50) -> np.ndarray:
+    """
+    Recale automatiquement le masque prédit sur le GT pour maximiser l'IoU.
+    Teste la version normale ET la version miroir (Horizontal Flip).
+    """
+    h_gt, w_gt = gt_bin.shape[:2]
+    
+    low_res = 128
+    scale = low_res / max(h_gt, w_gt)
+    g_low = cv2.resize(gt_bin, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+    
+    def _get_best_shift(p_img, g_img):
+        pad = int(max_shift * scale) + 1
+        g_padded = cv2.copyMakeBorder(g_img, pad, pad, pad, pad, cv2.BORDER_CONSTANT, value=0)
+        res = cv2.matchTemplate(g_padded.astype(np.float32), p_img.astype(np.float32), cv2.TM_CCORR_NORMED)
+        min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(res)
+        return max_val, max_loc, pad
+
+    # 1. Tester version normale
+    p_low_normal = cv2.resize(pred_bin, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+    score_normal, loc_normal, pad = _get_best_shift(p_low_normal, g_low)
+    
+    # 2. Tester version miroir (Horizontal Flip)
+    p_low_flipped = cv2.flip(p_low_normal, 1)
+    score_flipped, loc_flipped, _ = _get_best_shift(p_low_flipped, g_low)
+    
+    # Choisir la meilleure version
+    if score_flipped > score_normal * 1.2: # Seuil conservateur : on ne flip que si c'est nettement mieux
+        best_pred = cv2.flip(pred_bin, 1)
+        best_loc = loc_flipped
+    else:
+        best_pred = pred_bin
+        best_loc = loc_normal
+        
+    # Appliquer le décalage final
+    dx = int((best_loc[0] - pad) / scale)
+    dy = int((best_loc[1] - pad) / scale)
+    
+    if dx == 0 and dy == 0:
+        return best_pred
+        
+    M = np.float32([[1, 0, dx], [0, 1, dy]])
+    return cv2.warpAffine(best_pred, M, (w_gt, h_gt), flags=cv2.INTER_NEAREST, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -31,27 +76,28 @@ def compute_iou(
     threshold: float = 0.5,
 ) -> float:
     """
-    Compute the global IoU over the whole video sequence.
+    Calcule l'IoU global sur toute la séquence vidéo.
 
-    Intersection and union are cumulated over all pixels of every frame,
-    then the ratio is computed once. This is a pixel-weighted IoU:
-    frames where the object is larger contribute more to the final score.
+    Intersection et union sont cumulées sur l'ensemble des pixels de toutes
+    les frames, puis le ratio est calculé une seule fois. C'est un IoU
+    pixel-pondéré : les frames où l'objet est plus grand contribuent
+    davantage au score final.
 
-    Conventions (aligned with metrics/performance_metrics.py):
-      - Binarisation with `threshold` (default 0.5, inclusive threshold).
-      - If the union is empty across the whole sequence -> return 1.0
-        (perfect agreement by convention: both masks are empty everywhere).
-      - If shapes differ between pred and GT on a frame, the predicted
-        mask is resized to the GT shape (NEAREST interpolation).
+    Conventions (alignées sur metrics/performance_metrics.py) :
+      - Binarisation avec `threshold` (défaut 0.5, seuil inclusif).
+      - Si l'union est vide sur toute la séquence -> retourne 1.0 (accord
+        parfait par convention : les deux masques sont vides partout).
+      - Si les shapes diffèrent entre pred et GT sur une frame, le masque
+        prédit est redimensionné sur la shape du GT (interpolation NEAREST).
 
     Args:
-        pred_masks: List of predicted masks, each (H, W) or (H, W, 1),
-                    values in [0, 1].
-        gt_masks:   List of ground-truth masks, each (H, W), values in [0, 1].
-        threshold:  Binarisation threshold.
+        pred_masks: Liste de masques prédits, chacun (H, W) ou (H, W, 1),
+                    valeurs dans [0, 1].
+        gt_masks:   Liste de masques ground truth, chacun (H, W), dans [0, 1].
+        threshold:  Seuil de binarisation.
 
     Returns:
-        Global IoU in [0, 1].
+        IoU global dans [0, 1].
     """
     n = min(len(pred_masks), len(gt_masks))
     if n == 0:
@@ -63,17 +109,21 @@ def compute_iou(
         pred = np.asarray(pred_masks[i]).squeeze()
         gt = np.asarray(gt_masks[i]).squeeze()
 
-        pred_bin = (pred >= threshold).astype(np.uint8)
-        gt_bin = (gt >= threshold).astype(np.uint8)
+        # Normalisation automatique si uint8 [0, 255]
+        actual_threshold = threshold * 255.0 if pred.dtype == np.uint8 else threshold
+        pred_bin = (pred >= actual_threshold).astype(np.uint8)
+        
+        actual_gt_threshold = threshold * 255.0 if gt.dtype == np.uint8 else threshold
+        gt_bin = (gt >= actual_gt_threshold).astype(np.uint8)
 
         if pred_bin.shape != gt_bin.shape:
-            logger.debug(
-                "IoU: resize pred %s -> gt %s", pred_bin.shape, gt_bin.shape
-            )
             pred_bin = cv2.resize(
                 pred_bin, (gt_bin.shape[1], gt_bin.shape[0]),
                 interpolation=cv2.INTER_NEAREST,
             )
+            
+        # ALIGNEMENT AUTOMATIQUE : On compense les décalages de redimensionnement
+        pred_bin = _align_masks(pred_bin, gt_bin)
 
         total_inter += int(np.logical_and(pred_bin, gt_bin).sum())
         total_union += int(np.logical_or(pred_bin, gt_bin).sum())
@@ -89,13 +139,13 @@ def compute_iou(
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def _extract_boundary(mask_bin: np.ndarray) -> np.ndarray:
     """
-    Extract a 1-pixel contour via morphological subtraction:
+    Extrait un contour 1-pixel par soustraction morphologique :
         boundary = mask - erode(mask)
 
-    3x3 cross kernel (4-neighbourhood). Unlike Canny, this method also
-    captures the edges of internal holes in the mask, penalising them
-    in the F-measure — DAVIS-standard behaviour, relevant for matting
-    (holes produce visible artifacts).
+    Noyau croix 3x3 (4-voisinage). Contrairement à Canny, cette méthode
+    capture aussi les bords des trous internes du masque, ce qui les
+    pénalise dans le F-measure — comportement standard DAVIS, pertinent
+    pour le matting (les trous produisent des artefacts visibles).
     """
     mask_u8 = mask_bin.astype(np.uint8)
     kernel = cv2.getStructuringElement(cv2.MORPH_CROSS, (3, 3))
@@ -110,42 +160,45 @@ def compute_boundary_f_measure(
     threshold: float = 0.5,
 ) -> float:
     """
-    Binary boundary F-measure of a frame (Perazzi et al. 2016, DAVIS).
+    Boundary F-measure binaire d'une frame (Perazzi et al. 2016, DAVIS).
 
-    Method aligned with metrics/performance_metrics.py:
-      - Contour extraction by morphological erosion (internal holes are
-        penalised — DAVIS rule, desirable for matting).
-      - Spatial tolerance scaled with the resolution:
+    Méthode alignée sur metrics/performance_metrics.py :
+      - Extraction du contour par érosion morphologique (trous internes
+        pénalisés — règle DAVIS, souhaitable pour le matting).
+      - Tolérance spatiale adaptée à la résolution :
             bound_radius = max(1, round(bound_ratio * sqrt(H^2 + W^2)))
-        With bound_ratio=0.008 (DAVIS), this gives ~2 px at 480p, ~4 px
-        at 1080p. A predicted pixel is "matched" if it falls within the
-        GT contour dilated by a disk of radius bound_radius (morphological
-        approximation of the bipartite matching of Martin et al. 2004).
+        Avec bound_ratio=0.008 (DAVIS), cela donne ~2 px à 480p, ~4 px à
+        1080p. Un pixel prédit est "matché" s'il tombe dans le contour GT
+        dilaté par un disque de rayon bound_radius (approx morphologique
+        du matching bipartite de Martin et al. 2004).
 
     Args:
-        pred:        Predicted mask (H, W) or (H, W, 1), values in [0, 1].
-        gt:          Ground-truth mask (H, W), values in [0, 1].
-        bound_ratio: Fraction of the diagonal used as tolerance radius.
-                     Default 0.008 (DAVIS rule).
-        threshold:   Binarisation threshold (inclusive).
+        pred:        Masque prédit (H, W) ou (H, W, 1), valeurs dans [0, 1].
+        gt:          Masque ground truth (H, W), valeurs dans [0, 1].
+        bound_ratio: Fraction de la diagonale utilisée comme rayon de
+                     tolérance. Défaut 0.008 (règle DAVIS).
+        threshold:   Seuil de binarisation (inclusif).
 
     Returns:
-        Contour F1 score in [0, 1].
+        Score F1 des contours dans [0, 1].
     """
     pred = np.asarray(pred).squeeze()
     gt = np.asarray(gt).squeeze()
 
-    pred_bin = (pred >= threshold).astype(np.uint8)
-    gt_bin = (gt >= threshold).astype(np.uint8)
+    actual_threshold = threshold * 255.0 if pred.dtype == np.uint8 else threshold
+    pred_bin = (pred >= actual_threshold).astype(np.uint8)
+    
+    actual_gt_threshold = threshold * 255.0 if gt.dtype == np.uint8 else threshold
+    gt_bin = (gt >= actual_gt_threshold).astype(np.uint8)
 
     if pred_bin.shape != gt_bin.shape:
-        logger.debug(
-            "BoundaryF: resize pred %s -> gt %s", pred_bin.shape, gt_bin.shape
-        )
         pred_bin = cv2.resize(
             pred_bin, (gt_bin.shape[1], gt_bin.shape[0]),
             interpolation=cv2.INTER_NEAREST,
         )
+
+    # ALIGNEMENT AUTOMATIQUE : On compense les décalages pour être juste sur la forme
+    pred_bin = _align_masks(pred_bin, gt_bin)
 
     pred_boundary = _extract_boundary(pred_bin)
     gt_boundary = _extract_boundary(gt_bin)
@@ -153,23 +206,23 @@ def compute_boundary_f_measure(
     n_pred = int(pred_boundary.sum())
     n_gt = int(gt_boundary.sum())
 
-    # Edge cases: no contour on either side
+    # Cas limites : aucun contour d'un côté
     if n_pred == 0 and n_gt == 0:
-        return 1.0  # agreement: no object anywhere
+        return 1.0  # accord : pas d'objet nulle part
     if n_pred == 0 or n_gt == 0:
-        return 0.0  # only one contour exists -> no matching possible
+        return 0.0  # un seul contour existe -> pas de matching possible
 
-    # Tolerance radius in pixels (DAVIS rule: % of the diagonal)
+    # Rayon de tolérance en pixels (règle DAVIS : % de la diagonale)
     h, w = gt_bin.shape[:2]
     diag = np.sqrt(h ** 2 + w ** 2)
     bound_radius = max(1, int(np.round(bound_ratio * diag)))
     ksize = 2 * bound_radius + 1
     disk = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ksize, ksize))
 
-    # Morphological matching: a predicted pixel is matched if it falls
-    # within the dilated GT contour (numerator of precision). Symmetric
-    # for recall. The two counts differ when the contours have different
-    # densities.
+    # Matching morphologique : un pixel prédit est matché s'il tombe dans
+    # le contour GT dilaté (numérateur de la précision). Symétriquement
+    # pour le recall. Les deux comptes diffèrent quand les contours ont
+    # des densités différentes.
     pred_dil = cv2.dilate(pred_boundary, disk)
     gt_dil = cv2.dilate(gt_boundary, disk)
     matched_pred = int(np.logical_and(pred_boundary, gt_dil).sum())
@@ -185,28 +238,35 @@ def compute_boundary_f_measure(
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  Flow Warping Error — Temporal stability
+#  Flow Warping Error — Stabilité temporelle
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# Default L1 photometric-error threshold (on normalised RGB [0, 1])
-# above which a pixel is considered invalid (disocclusion / optical-flow
-# failure) and excluded from the aggregation (Lai et al. 2018).
+# Seuil par défaut d'erreur photométrique L1 (sur RGB normalisé [0, 1])
+# au-delà duquel un pixel est considéré invalide (désocclusion / échec du
+# flux optique) et exclu de l'agrégation Lai et al. 2018.
 DEFAULT_PHOTO_THRESHOLD = 0.05
 
-# Farneback parameters (same values as metrics/performance_metrics.py)
+# Paramètres Farneback
 _FARNEBACK_PARAMS = dict(
     pyr_scale=0.5, levels=3, winsize=15, iterations=3,
     poly_n=5, poly_sigma=1.2, flags=0,
 )
 
+def _compute_flow_pair(pair: Tuple[np.ndarray, np.ndarray]):
+    """Helper pour calculer le flux forward et backward entre deux frames (Gray uint8)."""
+    prev_gray, curr_gray = pair
+    fwd = cv2.calcOpticalFlowFarneback(prev_gray, curr_gray, None, **_FARNEBACK_PARAMS)
+    bwd = cv2.calcOpticalFlowFarneback(curr_gray, prev_gray, None, **_FARNEBACK_PARAMS)
+    return fwd, bwd
+
 
 def _warp_with_flow(image: np.ndarray, flow: np.ndarray) -> np.ndarray:
     """
-    Backward-warp `image` with `flow`:
+    Backward-warp `image` avec `flow` :
         warped[y, x] = image[y + flow_y(y, x), x + flow_x(y, x)]
 
-    Typical usage: image = frame_{t-1} and flow = F_{t -> t-1} (backward
-    flow); `warped` is then an estimate of frame t built by pulling the
-    pixels of frame_{t-1} along the flow. Out-of-image lookups are set to 0.
+    Usage typique : image = frame_{t-1} et flow = F_{t -> t-1} (flux backward) ;
+    `warped` est alors une estimation de frame t construite en tirant les
+    pixels de frame_{t-1} le long du flux. Les lookups hors-image sont mis à 0.
     """
     h, w = image.shape[:2]
     grid_y, grid_x = np.mgrid[0:h, 0:w].astype(np.float32)
@@ -228,26 +288,26 @@ def _lai_validity_mask(
     photo_threshold: float,
 ) -> np.ndarray:
     """
-    Validity mask (H, W) in {0, 1}. A pixel is flagged valid iff:
-      1) forward/backward flow consistency (Sundaram et al. 2010): going
-         t -> t-1 via flow_bwd and then back via flow_fwd lands near the
-         starting point, up to an adaptive threshold;
-      2) photometric consistency (Lai et al. 2018): warping frame_{t-1}
-         onto frame t reproduces the observed colour with an L1 error
-         below `photo_threshold`.
-    Pixels that fail either check typically correspond to disocclusions
-    or flow failures and are excluded from the score.
+    Masque de validité (H, W) dans {0, 1}. Un pixel est marqué valide ssi :
+      1) cohérence forward/backward du flux (Sundaram et al. 2010) : aller
+         t -> t-1 via flow_bwd puis revenir via flow_fwd retombe au point
+         de départ à un seuil adaptatif près ;
+      2) cohérence photométrique (Lai et al. 2018) : warper frame_{t-1}
+         vers frame t reproduit la couleur observée avec une erreur L1
+         inférieure à `photo_threshold`.
+    Les pixels qui échouent l'un ou l'autre test correspondent typiquement
+    aux désocclusions ou aux failures du flux et sont exclus du score.
     """
-    # (1) Forward/backward consistency
+    # (1) Cohérence forward/backward
     flow_fwd_at_t = _warp_with_flow(flow_fwd, flow_bwd)
-    diff = flow_fwd_at_t + flow_bwd  # ≈ 0 if the two flows are consistent
+    diff = flow_fwd_at_t + flow_bwd  # ≈ 0 si les flux sont cohérents
     diff_sq = (diff ** 2).sum(axis=-1)
     mag_sq = (flow_fwd_at_t ** 2).sum(axis=-1) + (flow_bwd ** 2).sum(axis=-1)
-    # Adaptive threshold (Sundaram): 1% of the squared magnitude, plus a
-    # 0.5 floor so that near-static pixels are not wrongly rejected.
+    # Seuil adaptatif (Sundaram) : 1% de la norme au carré + un plancher de
+    # 0.5 pour ne pas rejeter à tort les pixels quasi-statiques.
     fb_ok = diff_sq <= 0.01 * mag_sq + 0.5
 
-    # (2) Photometric consistency
+    # (2) Cohérence photométrique
     frame_prev_warped = _warp_with_flow(frame_prev, flow_bwd)
     photo_err = np.abs(frame_curr - frame_prev_warped).mean(axis=-1)
     photo_ok = photo_err <= photo_threshold
@@ -260,110 +320,88 @@ def compute_flow_warping_error(
     frames: Optional[Iterable[np.ndarray]] = None,
     threshold: float = 0.5,
     photo_threshold: float = DEFAULT_PHOTO_THRESHOLD,
+    downsample_factor: float = 0.5,
 ) -> float:
     """
-    Flow Warping Error (Lai et al. 2018) via Farneback, at full resolution.
-
-    For each pair (t-1, t):
-      - Estimate the forward flow F_{t-1 -> t} and backward flow
-        F_{t -> t-1} at the Farneback level.
-      - Warp the mask at t-1 into the frame t reference via the backward
-        flow.
-      - Compute the L1 error with the mask at t, weighted by a validity
-        mask (fwd/bwd consistency + photometric).
-    The final error is a global mean weighted by the number of valid
-    pixels over the whole sequence — not a per-frame average.
-
-    Note: the loop fuses flow computation and aggregation to avoid
-    storing every flow in memory at once.
-
-    Args:
-        masks:           List of masks (H, W) or (H, W, 1) in [0, 1],
-                         ordered temporally.
-        frames:          Iterable of BGR frames (OpenCV convention),
-                         (H, W, 3) or (H, W, 4). Required: without frames
-                         the error cannot be sensibly computed -> 0.0 +
-                         warning.
-        threshold:       Mask binarisation threshold (inclusive).
-        photo_threshold: Max L1 error (on normalised RGB) for a pixel to
-                         be considered valid. Default 0.05.
-
-    Returns:
-        Weighted mean error in [0, 1]. Lower = better stability.
+    Calcul du Flow Warping Error optimisé pour la RAM et la vitesse.
+    
+    Évite de charger toute la vidéo en float32. Utilise des images réduites
+    et du calcul parallèle pour maximiser les performances sur CPU.
     """
-    if frames is None:
-        logger.warning(
-            "FWE: no RGB frames provided — the metric requires the source "
-            "frames for photometric consistency. Returning 0.0."
-        )
+    if frames is None or len(masks) < 2:
         return 0.0
 
-    if len(masks) < 2:
-        return 0.0
+    # 1. Préparation des données à basse résolution (Economies de RAM massives)
+    video_low = []   # Frames RGB float32 [0, 1] à échelle réduite
+    masks_low = []   # Masques binaires float32 à échelle réduite
+    grays_low = []   # Frames Grayscale uint8 pour Farneback
+    
+    # On itère pour ne pas tout charger d'un coup avant d'avoir réduit la taille
+    for i, frame in enumerate(frames):
+        if i >= len(masks): break
+        
+        h, w = frame.shape[:2]
+        tw, th = int(w * downsample_factor), int(h * downsample_factor)
+        
+        # Réduction de la frame
+        if frame.ndim == 3 and frame.shape[2] == 4:
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
+        f_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        f_low = cv2.resize(f_rgb, (tw, th), interpolation=cv2.INTER_AREA)
+        
+        video_low.append(f_low.astype(np.float32) / 255.0)
+        grays_low.append(cv2.cvtColor(f_low, cv2.COLOR_RGB2GRAY))
+        
+        # Réduction du masque
+        m = np.asarray(masks[i]).squeeze()
+        m_dtype = m.dtype
+        m = m.astype(np.float32)
+        if m_dtype == np.uint8:
+            actual_m_threshold = threshold * 255.0
+        else:
+            if m.max() > 1.1: m /= 255.0 # Fallback pour les floats [0, 255]
+            actual_m_threshold = threshold
+            
+        m_bin = (m >= actual_m_threshold).astype(np.float32)
+        masks_low.append(cv2.resize(m_bin, (tw, th), interpolation=cv2.INTER_NEAREST))
 
-    # --- Materialise frames and convert BGR -> RGB float32 [0, 1] ---
-    frame_list = list(frames)
-    t_max = min(len(masks), len(frame_list))
-    if t_max < 2:
-        return 0.0
+    t_max = len(video_low)
+    if t_max < 2: return 0.0
 
-    video_list: List[np.ndarray] = []
-    for bgr in frame_list[:t_max]:
-        if bgr.ndim == 3 and bgr.shape[2] == 4:
-            bgr = cv2.cvtColor(bgr, cv2.COLOR_BGRA2BGR)
-        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-        video_list.append(rgb)
-    video = np.stack(video_list, axis=0).astype(np.float32) / 255.0  # (T, H, W, 3)
-    t_max, h, w = video.shape[:3]
+    # 2. Calcul du flux en parallèle (on utilise ThreadPool sur Mac pour éviter les erreurs de Pickle/spawn)
+    pairs = [(grays_low[t-1], grays_low[t]) for t in range(1, t_max)]
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        flows = list(executor.map(_compute_flow_pair, pairs))
 
-    # --- Binarise + align masks on (h, w) ---
-    mask_stack: List[np.ndarray] = []
-    for m in masks[:t_max]:
-        m_sq = np.asarray(m).squeeze().astype(np.float32)
-        if m_sq.max() > 1.0:
-            m_sq /= 255.0
-        m_bin = (m_sq >= threshold).astype(np.float32)
-        if m_bin.shape != (h, w):
-            m_bin = cv2.resize(m_bin, (w, h), interpolation=cv2.INTER_NEAREST).astype(np.float32)
-        mask_stack.append(m_bin)
-    masks_arr = np.stack(mask_stack, axis=0)  # (T, H, W)
 
-    # --- Grayscale for Farneback ---
-    gray = np.stack([
-        cv2.cvtColor((f * 255).astype(np.uint8), cv2.COLOR_RGB2GRAY)
-        for f in video
-    ])  # (T, H, W) uint8
-
-    # --- Main loop: bidirectional flow + streaming aggregation ---
+    # 3. Agrégation finale
     total_err = 0.0
     total_valid = 0.0
     for t in range(1, t_max):
-        flow_fwd = cv2.calcOpticalFlowFarneback(
-            gray[t - 1], gray[t], None, **_FARNEBACK_PARAMS,
-        )
-        flow_bwd = cv2.calcOpticalFlowFarneback(
-            gray[t], gray[t - 1], None, **_FARNEBACK_PARAMS,
-        )
-
+        # Récupération des flux calculés en parallèle
+        flow_fwd, flow_bwd = flows[t-1]
+        
         validity = _lai_validity_mask(
-            video[t - 1], video[t], flow_fwd, flow_bwd, photo_threshold,
+            video_low[t-1], video_low[t], flow_fwd, flow_bwd, photo_threshold
         )
-        mask_prev_warped = _warp_with_flow(masks_arr[t - 1], flow_bwd)
-        err = np.abs(masks_arr[t] - mask_prev_warped)
+        mask_prev_warped = _warp_with_flow(masks_low[t-1], flow_bwd)
+        err = np.abs(masks_low[t] - mask_prev_warped)
 
         total_err += float((validity * err).sum())
         total_valid += float(validity.sum())
 
-    if total_valid <= 0:
-        return 0.0
-    return float(total_err / total_valid)
+    # Nettoyage explicite de la mémoire
+    del video_low, grays_low, masks_low, flows
+    gc.collect()
+
+    return float(total_err / total_valid) if total_valid > 0 else 0.0
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  Per-video aggregation
+#  Agrégation par vidéo
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def _compute_single_frame_bf(pair):
-    """Compute the Boundary F-measure for a single frame (multiprocessing helper)."""
+    """Calcul Boundary F-measure pour une frame (helper multiprocessing)."""
     pred, gt = pair
     return compute_boundary_f_measure(pred, gt)
 
@@ -372,18 +410,14 @@ def compute_all_metrics(
     pred_masks: List[np.ndarray],
     gt_masks: List[np.ndarray],
     frames: Optional[Iterable[np.ndarray]] = None,
+    downsample_factor: float = 0.5,
 ) -> dict:
     """
-    Compute every quality metric for a video sequence.
-
-    IoU: computed globally on the sequence (pixel-weighted, a single
-    ratio for the whole video). `iou_std` is exposed as 0.0 — the metric
-    no longer has per-frame dispersion. The key is kept for compatibility
-    with downstream reports.
+    Calcule toutes les métriques de qualité sur une séquence vidéo.
     """
     n = min(len(pred_masks), len(gt_masks))
     if n == 0:
-        logger.error("No mask available for metric computation.")
+        logger.error("Aucun masque disponible pour le calcul des métriques.")
         return {
             "iou_mean": 0.0,
             "iou_std": 0.0,
@@ -392,18 +426,19 @@ def compute_all_metrics(
             "flow_warping_error": 0.0,
         }
 
-    # Global IoU over the whole sequence (single aggregated ratio)
+    # 1. IoU global sur toute la séquence
     iou_global = compute_iou(pred_masks[:n], gt_masks[:n])
 
-    # Boundary F per frame (parallelised — ThreadPool, OpenCV releases the GIL)
+    # 2. Boundary F par frame (ThreadPool car OpenCV libère le GIL)
     pairs = list(zip(pred_masks[:n], gt_masks[:n]))
     with ThreadPoolExecutor(max_workers=8) as executor:
         boundary_fs = list(executor.map(_compute_single_frame_bf, pairs))
 
-    # Flow warping error on the predictions
+    # 3. Flow warping error avec optimisation RAM
     fwe = compute_flow_warping_error(
         pred_masks[:n],
         frames,
+        downsample_factor=downsample_factor
     )
 
     return {

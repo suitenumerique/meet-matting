@@ -1,33 +1,37 @@
 """
-Streamlit dashboard for Video Matting Benchmark.
+Tableau de bord Streamlit pour le Benchmark Video Matting.
 
-Provides a modern interface for:
-  - Selecting models.
-  - Choosing the number of videos (random or not).
-  - Enabling mask saving.
-  - Viewing results in real time.
+Offre une interface moderne pour :
+  - Sélectionner les modèles.
+  - Choisir le nombre de vidéos (aléatoire ou non).
+  - Activer la sauvegarde des masques.
+  - Visualiser les résultats en temps réel.
 """
 
 import streamlit as st
 import pandas as pd
 import sys
 import os
+import warnings
 from pathlib import Path
 import time
 import logging
 
-# Silence Streamlit context warnings that spam the console during parallel processing
-logging.getLogger("streamlit.runtime.scriptrunner_utils.script_run_context").setLevel(logging.ERROR)
-logging.getLogger("streamlit.runtime.state.session_state_proxy").setLevel(logging.ERROR)
+# Silence Streamlit context warnings handled in benchmark/__init__.py
 
-# Add the parent to the path to import the benchmark modules
+
+# Ajouter le parent au path pour importer les modules benchmark
 sys.path.append(str(Path(__file__).parent.parent))
+
+# Silence MediaPipe / TF logs
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
+os.environ["GLOG_minloglevel"] = "3"
 
 from benchmark.models import MODEL_REGISTRY
 from benchmark.runner import run_benchmark, discover_datasets
-from benchmark.config import VIDEOS_DIR, GROUND_TRUTH_DIR, OUTPUT_DIR, TEMP_RESULTS_DIR
+from benchmark.config import VIDEOS_DIR, GROUND_TRUTH_DIR, OUTPUT_DIR, TEMP_RESULTS_DIR, DATASETS
 
-# Page configuration
+# Configuration de la page
 st.set_page_config(
     page_title="Video Matting Benchmark",
     page_icon="🎬",
@@ -35,7 +39,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom styling
+# Style Custom
 st.markdown("""
 <style>
     .main {
@@ -58,51 +62,96 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ── Sidebar: Configuration ──
-st.sidebar.title("⚙️ Configuration")
+# ── Sidebar : Configuration ──
+st.sidebar.subheader("Dataset")
+selected_ds_name = st.sidebar.selectbox(
+    "Choisir le dataset",
+    options=list(DATASETS.keys()),
+    index=0
+)
+ds_path = DATASETS[selected_ds_name]
+curr_videos_dir = ds_path / "videos"
+curr_gt_dir = ds_path / "ground_truth"
 
-st.sidebar.subheader("Videos")
-available_datasets = discover_datasets(VIDEOS_DIR, GROUND_TRUTH_DIR)
+@st.cache_data
+def get_available_datasets(v_dir, g_dir):
+    return discover_datasets(v_dir, g_dir)
+
+available_datasets = get_available_datasets(curr_videos_dir, curr_gt_dir)
+
 total_videos = len(available_datasets)
 
-num_videos = st.sidebar.number_input(
-    "Number of videos",
-    min_value=0,
-    max_value=total_videos,
-    value=min(1, total_videos),
-    help="0 = process all videos"
+# Mode de sélection des vidéos
+selection_mode = st.sidebar.radio(
+    "Filtrer les vidéos",
+    ["Toutes", "Nombre (Random)", "Plage (Range)", "Indices spécifiques"],
+    index=0
 )
 
-use_shuffle = st.sidebar.checkbox("Random selection (Shuffle)", value=True)
+video_indices = None
+num_videos_arg = None
+use_shuffle = False
+
+if selection_mode == "Nombre (Random)":
+    num_videos_arg = st.sidebar.number_input(
+        "Combien de vidéos ?", 
+        min_value=1, max_value=total_videos, value=min(5, total_videos)
+    )
+    use_shuffle = st.sidebar.checkbox("Sélection aléatoire", value=True)
+elif selection_mode == "Plage (Range)":
+    v_range = st.sidebar.slider(
+        "Sélectionner la plage d'indices",
+        1, total_videos, (1, min(10, total_videos)),
+        help="Indices 1-based des vidéos dans le dossier"
+    )
+    video_indices = list(range(v_range[0]-1, v_range[1]))
+elif selection_mode == "Indices spécifiques":
+    indices_str = st.sidebar.text_input(
+        "Entrez les numéros (ex: 1, 5, 10-15)", 
+        value="1",
+        help="Séparez par virgule ou utilisez des tirets pour les plages"
+    )
+    # Parsing simple des indices
+    try:
+        final_indices = []
+        for part in indices_str.split(','):
+            if '-' in part:
+                start, end = map(int, part.split('-'))
+                final_indices.extend(range(start-1, end))
+            else:
+                final_indices.append(int(part.strip()) - 1)
+        video_indices = sorted(list(set([i for i in final_indices if 0 <= i < total_videos])))
+    except Exception:
+        st.sidebar.error("Format d'indices invalide")
 
 st.sidebar.divider()
 
 st.sidebar.subheader("Options")
-save_masks = st.sidebar.checkbox("Save images (PNG)", value=False)
-save_video = st.sidebar.checkbox("Save masks (.mp4)", value=False)
-save_segmented = st.sidebar.checkbox("Save subject (.mp4)", value=True, help="Display person on black background")
+save_masks = st.sidebar.checkbox("Sauvegarder les images (PNG)", value=False)
+save_video = st.sidebar.checkbox("Sauvegarder les masques (.mp4)", value=False)
+save_segmented = st.sidebar.checkbox("Sauvegarder le sujet (.mp4)", value=True, help="Affiche la personne sur fond noir")
 
 st.sidebar.divider()
 
-# ── Main content ──
+# ── Main Content ──
 st.title("🎬 Video Matting Benchmark Dashboard")
 st.markdown("---")
 
 col1, col2 = st.columns([1, 2])
 
 with col1:
-    st.subheader("🤖 Model selection")
-    st.write("Check the models you want to include in the benchmark.")
-
-    # Selection toolbar
+    st.subheader("🤖 Sélection des Modèles")
+    st.write("Cochez les modèles que vous souhaitez inclure dans le benchmark.")
+    
+    # Barre d'outils de sélection
     c1, c2, c3 = st.columns([1, 1, 1])
-    if c1.button("✅ Check all"):
+    if c1.button("✅ Tout cocher"):
         for k in MODEL_REGISTRY.keys():
             st.session_state[f"cb_{k}"] = True
         st.session_state.selected_models = list(MODEL_REGISTRY.keys())
         st.rerun()
-
-    if c2.button("❌ Uncheck all"):
+        
+    if c2.button("❌ Tout décocher"):
         for k in MODEL_REGISTRY.keys():
             st.session_state[f"cb_{k}"] = False
         st.session_state.selected_models = []
@@ -111,22 +160,22 @@ with col1:
     if 'selected_models' not in st.session_state:
         st.session_state.selected_models = list(MODEL_REGISTRY.keys())
 
-    # Model cards grid
+    # Grille de cartes de modèles
     st.markdown("---")
-
-    # Metadata to enhance the UI
+    
+    # Métadonnées pour enrichir l'UI
     model_info = {
-        "mediapipe": {"tag": "⚡ FAST", "desc": "Google's mobile-optimised solution", "color": "#28a745"},
-        "rvm": {"tag": "🎬 VIDEO", "desc": "Recurrent temporal coherence", "color": "#007bff"},
-        "modnet": {"tag": "💎 QUALITY", "desc": "High-resolution portrait matting", "color": "#6f42c1"},
-        "pphumanseg": {"tag": "📱 MOBILE", "desc": "Ultra-lightweight from PaddleSeg", "color": "#fd7e14"},
-        "efficientvit": {"tag": "🚀 SOTA", "desc": "High-performance Transformer", "color": "#dc3545"},
-        "mobilenetv3": {"tag": "⚖️ BALANCE", "desc": "Lightweight industry standard", "color": "#6c757d"},
+        "mediapipe": {"tag": "⚡ RAPIDE", "desc": "Solution Google optimisée mobile", "color": "#28a745"},
+        "rvm": {"tag": "🎬 VIDÉO", "desc": "Cohérence temporelle récurrente", "color": "#007bff"},
+        "modnet": {"tag": "💎 QUALITÉ", "desc": "Portrait matting haute résolution", "color": "#6f42c1"},
+        "pphumanseg": {"tag": "📱 MOBILE", "desc": "Ultra-léger par PaddleSeg", "color": "#fd7e14"},
+        "efficientvit": {"tag": "🚀 SOTA", "desc": "Transformer haute performance", "color": "#dc3545"},
+        "mobilenetv3": {"tag": "⚖️ ÉQUILIBRE", "desc": "Standard industriel léger", "color": "#6c757d"},
     }
 
     selected_list = []
-
-    # Iterate by groups to make rows of 2
+    
+    # On itère par groupes pour faire des rangées de 2
     keys = list(MODEL_REGISTRY.keys())
     for i in range(0, len(keys), 2):
         row_cols = st.columns(2)
@@ -134,82 +183,94 @@ with col1:
             if i + j < len(keys):
                 key = keys[i+j]
                 m_instance = MODEL_REGISTRY[key]()
-                info = model_info.get(key, {"tag": "MODEL", "desc": "Person Segmentation", "color": "#333"})
-
+                info = model_info.get(key, {"tag": "MODÈLE", "desc": "Segmentation Personne", "color": "#333"})
+                
                 with row_cols[j]:
-                    # Styled card container
+                    # Conteneur stylisé pour la "carte"
                     with st.container(border=True):
                         is_selected = st.checkbox(
-                            f"**{m_instance.name}**",
+                            f"**{m_instance.name}**", 
                             value=(key in st.session_state.selected_models),
                             key=f"cb_{key}",
                             help=info['desc']
                         )
                         st.markdown(f"<span style='background-color:{info['color']}; color:white; padding:2px 6px; border-radius:4px; font-size:10px; font-weight:bold;'>{info['tag']}</span>", unsafe_allow_html=True)
                         st.caption(info['desc'])
-
+                        
                         if is_selected:
                             selected_list.append(key)
 
-    # Update the state
+    # Mise à jour de l'état
     st.session_state.selected_models = selected_list
     selected_models = selected_list
 
 with col2:
-    st.subheader("ℹ️ Benchmark preview")
+    st.subheader("ℹ️ Aperçu du Benchmark")
     st.info(f"""
-    - **Videos detected**: {total_videos}
-    - **Sequences to process**: {num_videos if num_videos > 0 else total_videos}
-    - **Total combinations**: {len(selected_models) * (num_videos if num_videos > 0 else total_videos)}
-    - **Output folder**: `{OUTPUT_DIR.relative_to(Path.cwd())}`
+    - **Vidéos détectées** : {total_videos}
+    - **Séquences à traiter** : {num_videos_arg if (num_videos_arg and num_videos_arg > 0) else (len(video_indices) if video_indices else total_videos)}
+    - **Combinaisons total** : {len(selected_models) * (num_videos_arg if (num_videos_arg and num_videos_arg > 0) else (len(video_indices) if video_indices else total_videos))}
+    - **Dossier Sortie** : `{OUTPUT_DIR.relative_to(Path.cwd())}`
     """)
+    
+    launch_btn = st.button("🚀 LANCER LE BENCHMARK", type="primary")
 
-    launch_btn = st.button("🚀 LAUNCH BENCHMARK", type="primary")
-
-# ── Execution ──
+# ── Exécution ──
 if launch_btn:
     if not selected_models:
-        st.error("Please select at least one model.")
+        st.error("Veuillez sélectionner au moins un modèle.")
     else:
-        with st.status("🛠️ Benchmark in progress...", expanded=True) as status:
-            st.write("Initialising models...")
+        with st.status("🛠️ Benchmark en cours...", expanded=True) as status:
+            progress_bar = st.progress(0)
+            progress_text = st.empty()
+            
+            def update_progress(current, total, message):
+                progress_bar.progress(current / total)
+                progress_text.text(message)
+
+            st.write("Initialisation des modèles...")
             models = [MODEL_REGISTRY[key]() for key in selected_models]
-
-            st.write("Starting the benchmark engine...")
+            
+            st.write("Lancement du moteur de benchmark...")
             t_start = time.time()
-
-            # Redirect logs from runner.py to Streamlit if possible or just wait for completion
-            # For now we just run the function
+            
             results = run_benchmark(
                     models=models,
-                    num_videos=num_videos if num_videos > 0 else None,
+                    videos_dir=curr_videos_dir,
+                    gt_dir=curr_gt_dir,
+                    num_videos=num_videos_arg,
                     random_selection=use_shuffle,
+                    video_indices=video_indices,
                     save_masks=save_masks,
                     save_video=save_video,
-                    save_segmented=save_segmented
+                    save_segmented=save_segmented,
+                    progress_callback=update_progress
                 )
-
+            
             t_end = time.time()
-            status.update(label=f"✅ Completed in {t_end - t_start:.1f}s", state="complete")
+            progress_bar.empty()
+            progress_text.empty()
+            status.update(label=f"✅ Terminé en {t_end - t_start:.1f}s", state="complete")
 
-        # ── Results ──
-        st.success("Benchmark completed successfully!")
-
+        
+        # ── Résultats ──
+        st.success("Benchmark terminé avec succès !")
+        
         if results:
             df = pd.DataFrame(results)
-            # Clean up for display: only take columns that exist
+            # Nettoyage pour affichage : ne prendre que les colonnes qui existent
             all_potential_cols = [
-                "model", "video", "status", "latency_p95_ms",
+                "model", "video", "status", "latency_p95_ms", 
                 "iou_mean", "boundary_f_mean", "flow_warping_error", "flops_per_frame"
             ]
             display_cols = [c for c in all_potential_cols if c in df.columns]
             df_display = df[display_cols].copy()
-
-            st.subheader("📊 Results")
-
-            # Apply styling only to existing numeric columns
+            
+            st.subheader("📊 Résultats")
+            
+            # Application du style seulement sur les colonnes numériques existantes
             numeric_cols = [c for c in ["iou_mean", "boundary_f_mean", "latency_p95_ms", "flow_warping_error"] if c in df_display.columns]
-
+            
             styled_df = df_display.style
             if "iou_mean" in df_display.columns:
                 styled_df = styled_df.highlight_max(subset=["iou_mean"], color='#d4edda')
@@ -217,35 +278,50 @@ if launch_btn:
                 styled_df = styled_df.highlight_max(subset=["boundary_f_mean"], color='#d4edda')
             if "latency_p95_ms" in df_display.columns:
                 styled_df = styled_df.highlight_min(subset=["latency_p95_ms"], color='#d4edda')
-
+            
             st.dataframe(styled_df, width='stretch')
-
-            # CSV download button
+            
+            # Bouton de téléchargement CSV
             csv = df_display.to_csv(index=False).encode('utf-8')
             st.download_button(
-                label="📥 Download results (CSV)",
+                label="📥 Télécharger les résultats (CSV)",
                 data=csv,
                 file_name=f"benchmark_results_{int(time.time())}.csv",
                 mime='text/csv',
             )
-
-            # Average metrics per model
-            st.subheader("📈 Averages per model")
+            
+            # Métriques moyennes par modèle
+            st.subheader("📈 Moyennes par Modèle")
             avg_df = df_display.groupby("model").mean(numeric_only=True).reset_index()
+            
             if not avg_df.empty:
-                st.table(avg_df)
+                # Arrondir pour un affichage propre
+                avg_df_styled = avg_df.style.format(precision=4)
+                st.dataframe(avg_df_styled, width='stretch')
+                
+                # Bouton de téléchargement des moyennes
+                avg_csv = avg_df.to_csv(index=False).encode('utf-8')
+                st.download_button(
+                    label="📊 Télécharger les MOYENNES par modèle (CSV)",
+                    data=avg_csv,
+                    file_name=f"model_averages_{int(time.time())}.csv",
+                    mime='text/csv',
+                    key="download_avg"
+                )
+
                 if "iou_mean" in avg_df.columns:
                     st.bar_chart(avg_df, x="model", y="iou_mean")
             else:
-                st.info("Not enough valid data to compute averages.")
+                st.info("Pas assez de données valides pour calculer des moyennes.")
+
         else:
-            st.warning("No results produced. Check your datasets.")
+            st.warning("Aucun résultat n'a été produit. Vérifiez vos fichiers datasets.")
 
 else:
-    # Message if not yet launched
-    st.info("Configure the parameters in the sidebar and click Launch.")
-
-    # Display old results if they exist
+    # Message si pas encore lancé
+    st.info("Configurez les paramètres dans la barre latérale et cliquez sur Lancer.")
+    
+    # Afficher les anciens résultats si ils existent
     res_path = OUTPUT_DIR / "benchmark_results.csv"
     if res_path.exists():
         st.subheader("Last Run Results")

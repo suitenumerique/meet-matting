@@ -1,10 +1,10 @@
 """
-Model wrappers for the Video Matting benchmark.
+Model wrappers pour le benchmark de Video Matting.
 
-Each wrapper inherits from BaseModelWrapper and implements:
-  - load()      : Load the model
-  - predict()   : Run inference on a frame
-  - cleanup()   : Release resources
+Chaque wrapper hérite de BaseModelWrapper et implémente :
+  - load()      : Chargement du modèle
+  - predict()   : Inférence sur une frame
+  - cleanup()   : Libération des ressources
 """
 
 from .base import BaseModelWrapper
@@ -20,7 +20,7 @@ from .modnet import MODNetWrapper
 from .pphumanseg import PPHumanSegV2Wrapper
 from .efficient_vit import EfficientViTWrapper
 
-# Registry of every model available for the benchmark
+# Registre de tous les modèles disponibles pour le benchmark
 MODEL_REGISTRY: dict[str, type[BaseModelWrapper]] = {
     "mediapipe_portrait": MediapipePortraitWrapper,
     "mediapipe_selfie_multiclass": MediapipeSelfieMulticlassWrapper,
