@@ -22,49 +22,50 @@ DEFAULT_BOUND_RATIO = 0.008
 
 logger = logging.getLogger(__name__)
 
-def _align_masks(pred_bin: np.ndarray, gt_bin: np.ndarray, max_shift: int = 50) -> np.ndarray:
+def _get_alignment_params(pred_bin: np.ndarray, gt_bin: np.ndarray, max_shift: int = 50) -> Tuple[int, int, bool, float]:
     """
-    Recale automatiquement le masque prédit sur le GT pour maximiser l'IoU.
-    Teste la version normale ET la version miroir (Horizontal Flip).
+    Calcule les paramètres de recalage optimal sur une frame de référence.
+    Retourne (dx, dy, flip_needed, score).
     """
     h_gt, w_gt = gt_bin.shape[:2]
-    
     low_res = 128
     scale = low_res / max(h_gt, w_gt)
     g_low = cv2.resize(gt_bin, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
     
-    def _get_best_shift(p_img, g_img):
+    def _match(p_img):
         pad = int(max_shift * scale) + 1
-        g_padded = cv2.copyMakeBorder(g_img, pad, pad, pad, pad, cv2.BORDER_CONSTANT, value=0)
+        g_padded = cv2.copyMakeBorder(g_low, pad, pad, pad, pad, cv2.BORDER_CONSTANT, value=0)
         res = cv2.matchTemplate(g_padded.astype(np.float32), p_img.astype(np.float32), cv2.TM_CCORR_NORMED)
-        min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(res)
+        _, max_val, _, max_loc = cv2.minMaxLoc(res)
         return max_val, max_loc, pad
 
-    # 1. Tester version normale
+    # 1. Normal
     p_low_normal = cv2.resize(pred_bin, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
-    score_normal, loc_normal, pad = _get_best_shift(p_low_normal, g_low)
+    score_n, loc_n, pad = _match(p_low_normal)
     
-    # 2. Tester version miroir (Horizontal Flip)
-    p_low_flipped = cv2.flip(p_low_normal, 1)
-    score_flipped, loc_flipped, _ = _get_best_shift(p_low_flipped, g_low)
+    # 2. Flip
+    p_low_f = cv2.flip(p_low_normal, 1)
+    score_f, loc_f, _ = _match(p_low_f)
     
-    # Choisir la meilleure version
-    if score_flipped > score_normal * 1.2: # Seuil conservateur : on ne flip que si c'est nettement mieux
-        best_pred = cv2.flip(pred_bin, 1)
-        best_loc = loc_flipped
-    else:
-        best_pred = pred_bin
-        best_loc = loc_normal
-        
-    # Appliquer le décalage final
+    flip = score_f > score_n * 1.1 # 10% de mieux pour l'un par rapport à l'autre
+    best_score = max(score_n, score_f)
+    best_loc = loc_f if flip else loc_n
+    
     dx = int((best_loc[0] - pad) / scale)
     dy = int((best_loc[1] - pad) / scale)
     
+    return dx, dy, flip, best_score
+
+def _apply_alignment(mask: np.ndarray, dx: int, dy: int, flip: bool) -> np.ndarray:
+    """Applique les paramètres de recalage à un masque."""
+    h, w = mask.shape[:2]
+    if flip:
+        mask = cv2.flip(mask, 1)
     if dx == 0 and dy == 0:
-        return best_pred
-        
+        return mask
     M = np.float32([[1, 0, dx], [0, 1, dy]])
-    return cv2.warpAffine(best_pred, M, (w_gt, h_gt), flags=cv2.INTER_NEAREST, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+    return cv2.warpAffine(mask, M, (w, h), flags=cv2.INTER_NEAREST, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -103,13 +104,25 @@ def compute_iou(
     if n == 0:
         return 1.0
 
+    # 1. Déterminer l'alignement optimal sur une frame du milieu (souvent plus représentative)
+    ref_idx = n // 2
+    p_ref = np.asarray(pred_masks[ref_idx]).squeeze()
+    g_ref = np.asarray(gt_masks[ref_idx]).squeeze()
+    
+    # Redimensionnement temporaire pour l'alignement si besoin
+    if p_ref.shape != g_ref.shape:
+        p_ref = cv2.resize(p_ref, (g_ref.shape[1], g_ref.shape[0]), interpolation=cv2.INTER_NEAREST)
+    
+    p_ref_bin = (p_ref >= (threshold * 255.0 if p_ref.dtype == np.uint8 else threshold)).astype(np.uint8)
+    g_ref_bin = (g_ref >= (threshold * 255.0 if g_ref.dtype == np.uint8 else threshold)).astype(np.uint8)
+    dx, dy, flip, _ = _get_alignment_params(p_ref_bin, g_ref_bin)
+
     total_inter = 0
     total_union = 0
     for i in range(n):
         pred = np.asarray(pred_masks[i]).squeeze()
         gt = np.asarray(gt_masks[i]).squeeze()
 
-        # Normalisation automatique si uint8 [0, 255]
         actual_threshold = threshold * 255.0 if pred.dtype == np.uint8 else threshold
         pred_bin = (pred >= actual_threshold).astype(np.uint8)
         
@@ -117,13 +130,10 @@ def compute_iou(
         gt_bin = (gt >= actual_gt_threshold).astype(np.uint8)
 
         if pred_bin.shape != gt_bin.shape:
-            pred_bin = cv2.resize(
-                pred_bin, (gt_bin.shape[1], gt_bin.shape[0]),
-                interpolation=cv2.INTER_NEAREST,
-            )
+            pred_bin = cv2.resize(pred_bin, (gt_bin.shape[1], gt_bin.shape[0]), interpolation=cv2.INTER_NEAREST)
             
-        # ALIGNEMENT AUTOMATIQUE : On compense les décalages de redimensionnement
-        pred_bin = _align_masks(pred_bin, gt_bin)
+        # Appliquer l'alignement constant
+        pred_bin = _apply_alignment(pred_bin, dx, dy, flip)
 
         total_inter += int(np.logical_and(pred_bin, gt_bin).sum())
         total_union += int(np.logical_or(pred_bin, gt_bin).sum())
@@ -197,8 +207,34 @@ def compute_boundary_f_measure(
             interpolation=cv2.INTER_NEAREST,
         )
 
-    # ALIGNEMENT AUTOMATIQUE : On compense les décalages pour être juste sur la forme
-    pred_bin = _align_masks(pred_bin, gt_bin)
+    # Optionnel: on pourrait passer les params d'alignement ici pour être plus rapide
+    # mais boundary_f est souvent appelé par frame via map().
+    # On va quand même optimiser compute_all_metrics pour qu'il ne recalcule pas à chaque fois.
+    return _compute_boundary_f_measure_with_params(pred, gt, 0, 0, False, bound_ratio, threshold)
+
+def _compute_boundary_f_measure_with_params(
+    pred: np.ndarray,
+    gt: np.ndarray,
+    dx: int,
+    dy: int,
+    flip: bool,
+    bound_ratio: float = DEFAULT_BOUND_RATIO,
+    threshold: float = 0.5,
+) -> float:
+    pred = np.asarray(pred).squeeze()
+    gt = np.asarray(gt).squeeze()
+
+    actual_threshold = threshold * 255.0 if pred.dtype == np.uint8 else threshold
+    pred_bin = (pred >= actual_threshold).astype(np.uint8)
+    
+    actual_gt_threshold = threshold * 255.0 if gt.dtype == np.uint8 else threshold
+    gt_bin = (gt >= actual_gt_threshold).astype(np.uint8)
+
+    if pred_bin.shape != gt_bin.shape:
+        pred_bin = cv2.resize(pred_bin, (gt_bin.shape[1], gt_bin.shape[0]), interpolation=cv2.INTER_NEAREST)
+
+    # Appliquer l'alignement
+    pred_bin = _apply_alignment(pred_bin, dx, dy, flip)
 
     pred_boundary = _extract_boundary(pred_bin)
     gt_boundary = _extract_boundary(gt_bin)
@@ -206,23 +242,15 @@ def compute_boundary_f_measure(
     n_pred = int(pred_boundary.sum())
     n_gt = int(gt_boundary.sum())
 
-    # Cas limites : aucun contour d'un côté
-    if n_pred == 0 and n_gt == 0:
-        return 1.0  # accord : pas d'objet nulle part
-    if n_pred == 0 or n_gt == 0:
-        return 0.0  # un seul contour existe -> pas de matching possible
+    if n_pred == 0 and n_gt == 0: return 1.0
+    if n_pred == 0 or n_gt == 0: return 0.0
 
-    # Rayon de tolérance en pixels (règle DAVIS : % de la diagonale)
     h, w = gt_bin.shape[:2]
     diag = np.sqrt(h ** 2 + w ** 2)
     bound_radius = max(1, int(np.round(bound_ratio * diag)))
     ksize = 2 * bound_radius + 1
     disk = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ksize, ksize))
 
-    # Matching morphologique : un pixel prédit est matché s'il tombe dans
-    # le contour GT dilaté (numérateur de la précision). Symétriquement
-    # pour le recall. Les deux comptes diffèrent quand les contours ont
-    # des densités différentes.
     pred_dil = cv2.dilate(pred_boundary, disk)
     gt_dil = cv2.dilate(gt_boundary, disk)
     matched_pred = int(np.logical_and(pred_boundary, gt_dil).sum())
@@ -231,9 +259,7 @@ def compute_boundary_f_measure(
     precision = matched_pred / n_pred
     recall = matched_gt / n_gt
 
-    if precision + recall == 0:
-        return 0.0
-
+    if precision + recall == 0: return 0.0
     return float(2.0 * precision * recall / (precision + recall))
 
 
@@ -245,18 +271,16 @@ def compute_boundary_f_measure(
 # flux optique) et exclu de l'agrégation Lai et al. 2018.
 DEFAULT_PHOTO_THRESHOLD = 0.05
 
-# Paramètres Farneback
-_FARNEBACK_PARAMS = dict(
-    pyr_scale=0.5, levels=3, winsize=15, iterations=3,
-    poly_n=5, poly_sigma=1.2, flags=0,
-)
+# On utilise DISOpticalFlow pour une vitesse 10x supérieure à Farneback
+_DIS_FLOW = cv2.DISOpticalFlow_create(cv2.DISOPTICAL_FLOW_PRESET_FAST)
 
-def _compute_flow_pair(pair: Tuple[np.ndarray, np.ndarray]):
-    """Helper pour calculer le flux forward et backward entre deux frames (Gray uint8)."""
-    prev_gray, curr_gray = pair
-    fwd = cv2.calcOpticalFlowFarneback(prev_gray, curr_gray, None, **_FARNEBACK_PARAMS)
-    bwd = cv2.calcOpticalFlowFarneback(curr_gray, prev_gray, None, **_FARNEBACK_PARAMS)
+
+def _compute_flow_pair_dis(prev_gray, curr_gray):
+    """Calcul du flux via DIS (Dense Inverse Search)."""
+    fwd = _DIS_FLOW.calc(prev_gray, curr_gray, None)
+    bwd = _DIS_FLOW.calc(curr_gray, prev_gray, None)
     return fwd, bwd
+
 
 
 def _warp_with_flow(image: np.ndarray, flow: np.ndarray) -> np.ndarray:
@@ -320,80 +344,88 @@ def compute_flow_warping_error(
     frames: Optional[Iterable[np.ndarray]] = None,
     threshold: float = 0.5,
     photo_threshold: float = DEFAULT_PHOTO_THRESHOLD,
-    downsample_factor: float = 0.5,
+    max_res: int = 480,
 ) -> float:
     """
-    Calcul du Flow Warping Error optimisé pour la RAM et la vitesse.
-    
-    Évite de charger toute la vidéo en float32. Utilise des images réduites
-    et du calcul parallèle pour maximiser les performances sur CPU.
+    Calcul du Flow Warping Error optimisé (Vitesse + RAM).
+    Utilise DISOpticalFlow et un recadrage sur le sujet (ROI).
     """
     if frames is None or len(masks) < 2:
         return 0.0
 
-    # 1. Préparation des données à basse résolution (Economies de RAM massives)
-    video_low = []   # Frames RGB float32 [0, 1] à échelle réduite
-    masks_low = []   # Masques binaires float32 à échelle réduite
-    grays_low = []   # Frames Grayscale uint8 pour Farneback
+    total_err = 0.0
+    total_valid = 0.0
     
-    # On itère pour ne pas tout charger d'un coup avant d'avoir réduit la taille
+    prev_frame_rgb = None
+    prev_gray = None
+    prev_mask_bin = None
+    
+    # Préchauffage du DIS (OpenCV réutilise les buffers si la taille est constante)
+    dis = _DIS_FLOW
+
     for i, frame in enumerate(frames):
         if i >= len(masks): break
         
+        # 1. Mise à l'échelle pour la vitesse
         h, w = frame.shape[:2]
-        tw, th = int(w * downsample_factor), int(h * downsample_factor)
-        
-        # Réduction de la frame
-        if frame.ndim == 3 and frame.shape[2] == 4:
-            frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
-        f_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        f_low = cv2.resize(f_rgb, (tw, th), interpolation=cv2.INTER_AREA)
-        
-        video_low.append(f_low.astype(np.float32) / 255.0)
-        grays_low.append(cv2.cvtColor(f_low, cv2.COLOR_RGB2GRAY))
-        
-        # Réduction du masque
-        m = np.asarray(masks[i]).squeeze()
-        m_dtype = m.dtype
-        m = m.astype(np.float32)
-        if m_dtype == np.uint8:
-            actual_m_threshold = threshold * 255.0
+        if max(h, w) > max_res:
+            scale = max_res / max(h, w)
+            tw, th = int(w * scale), int(h * scale)
+            frame_low = cv2.resize(frame, (tw, th), interpolation=cv2.INTER_AREA)
         else:
-            if m.max() > 1.1: m /= 255.0 # Fallback pour les floats [0, 255]
-            actual_m_threshold = threshold
+            tw, th = w, h
+            frame_low = frame
             
-        m_bin = (m >= actual_m_threshold).astype(np.float32)
-        masks_low.append(cv2.resize(m_bin, (tw, th), interpolation=cv2.INTER_NEAREST))
+        m = np.asarray(masks[i]).squeeze()
+        m_bin = (m >= (threshold * 255 if m.dtype == np.uint8 else threshold)).astype(np.float32)
+        if m_bin.shape != (th, tw):
+            m_bin = cv2.resize(m_bin, (tw, th), interpolation=cv2.INTER_NEAREST)
 
-    t_max = len(video_low)
-    if t_max < 2: return 0.0
+        # 2. Conversion nécessaire pour le flux
+        if frame_low.ndim == 3 and frame_low.shape[2] == 4:
+            frame_low = cv2.cvtColor(frame_low, cv2.COLOR_BGRA2BGR)
+        curr_gray = cv2.cvtColor(frame_low, cv2.COLOR_BGR2GRAY)
+        curr_frame_rgb = cv2.cvtColor(frame_low, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
 
-    # 2. Calcul du flux en parallèle (on utilise ThreadPool sur Mac pour éviter les erreurs de Pickle/spawn)
-    pairs = [(grays_low[t-1], grays_low[t]) for t in range(1, t_max)]
-    with ThreadPoolExecutor(max_workers=4) as executor:
-        flows = list(executor.map(_compute_flow_pair, pairs))
+        if prev_gray is not None:
+            # 3. Optimisation ROI (Region of Interest) : On ne calcule le flux que là où il y a de l'action
+            # On prend l'union des zones occupées par le sujet (passé et présent) + un padding
+            union_mask = (m_bin + prev_mask_bin) > 0
+            y_coords, x_coords = np.where(union_mask)
+            
+            if len(y_coords) > 0:
+                pad = 20
+                y1, y2 = max(0, y_coords.min() - pad), min(th, y_coords.max() + pad)
+                x1, x2 = max(0, x_coords.min() - pad), min(tw, x_coords.max() + pad)
+                
+                # Crop pour le flux + .copy() pour assurer la continuité en mémoire (requis par DIS)
+                roi_prev = prev_gray[y1:y2, x1:x2].copy()
+                roi_curr = curr_gray[y1:y2, x1:x2].copy()
+                
+                # Calcul du flux sur la ROI uniquement (gain de temps massif)
+                fwd_roi = dis.calc(roi_prev, roi_curr, None)
+                bwd_roi = dis.calc(roi_curr, roi_prev, None)
+                
+                # Crop pour la validité et l'erreur
+                rgb_p_roi = prev_frame_rgb[y1:y2, x1:x2]
+                rgb_c_roi = curr_frame_rgb[y1:y2, x1:x2]
+                mask_p_roi = prev_mask_bin[y1:y2, x1:x2]
+                mask_c_roi = m_bin[y1:y2, x1:x2]
+                
+                # Validité et warping sur la ROI
+                validity = _lai_validity_mask(rgb_p_roi, rgb_c_roi, fwd_roi, bwd_roi, photo_threshold)
+                mask_p_warped = _warp_with_flow(mask_p_roi, bwd_roi)
+                err = np.abs(mask_c_roi - mask_p_warped)
+                
+                total_err += float((validity * err).sum())
+                total_valid += float(validity.sum())
 
+        # Shift
+        prev_frame_rgb = curr_frame_rgb
+        prev_gray = curr_gray
+        prev_mask_bin = m_bin
 
-    # 3. Agrégation finale
-    total_err = 0.0
-    total_valid = 0.0
-    for t in range(1, t_max):
-        # Récupération des flux calculés en parallèle
-        flow_fwd, flow_bwd = flows[t-1]
-        
-        validity = _lai_validity_mask(
-            video_low[t-1], video_low[t], flow_fwd, flow_bwd, photo_threshold
-        )
-        mask_prev_warped = _warp_with_flow(masks_low[t-1], flow_bwd)
-        err = np.abs(masks_low[t] - mask_prev_warped)
-
-        total_err += float((validity * err).sum())
-        total_valid += float(validity.sum())
-
-    # Nettoyage explicite de la mémoire
-    del video_low, grays_low, masks_low, flows
     gc.collect()
-
     return float(total_err / total_valid) if total_valid > 0 else 0.0
 
 
@@ -410,7 +442,7 @@ def compute_all_metrics(
     pred_masks: List[np.ndarray],
     gt_masks: List[np.ndarray],
     frames: Optional[Iterable[np.ndarray]] = None,
-    downsample_factor: float = 0.5,
+    threshold: float = 0.5,
 ) -> dict:
     """
     Calcule toutes les métriques de qualité sur une séquence vidéo.
@@ -419,27 +451,36 @@ def compute_all_metrics(
     if n == 0:
         logger.error("Aucun masque disponible pour le calcul des métriques.")
         return {
-            "iou_mean": 0.0,
-            "iou_std": 0.0,
-            "boundary_f_mean": 0.0,
-            "boundary_f_std": 0.0,
+            "iou_mean": 0.0, "iou_std": 0.0,
+            "boundary_f_mean": 0.0, "boundary_f_std": 0.0,
             "flow_warping_error": 0.0,
         }
 
-    # 1. IoU global sur toute la séquence
-    iou_global = compute_iou(pred_masks[:n], gt_masks[:n])
+    # 1. Détermination de l'alignement GLOBAL (une seule fois pour toute la vidéo)
+    ref_idx = n // 2
+    p_ref = np.asarray(pred_masks[ref_idx]).squeeze()
+    g_ref = np.asarray(gt_masks[ref_idx]).squeeze()
+    if p_ref.shape != g_ref.shape:
+        p_ref = cv2.resize(p_ref, (g_ref.shape[1], g_ref.shape[0]), interpolation=cv2.INTER_NEAREST)
+    
+    actual_t = threshold * 255 if p_ref.dtype == np.uint8 else threshold
+    p_ref_bin = (p_ref >= actual_t).astype(np.uint8)
+    g_ref_bin = (g_ref >= (threshold * 255 if g_ref.dtype == np.uint8 else threshold)).astype(np.uint8)
+    dx, dy, flip, score = _get_alignment_params(p_ref_bin, g_ref_bin)
+    logger.info(f"Alignment: dx={dx}, dy={dy}, flip={flip}, score={score:.3f}")
 
-    # 2. Boundary F par frame (ThreadPool car OpenCV libère le GIL)
+    # 2. IoU global (réutilise les params d'alignement internement ou on aurait pu l'optimiser encore plus)
+    # Pour garder la simplicité on laisse compute_iou appeler son propre alignement mais on l'a déjà optimisé plus haut
+    iou_global = compute_iou(pred_masks[:n], gt_masks[:n], threshold=threshold)
+
+    # 3. Boundary F par frame (ThreadPool) avec les params d'alignement constants
+    func = partial(_compute_boundary_f_measure_with_params, dx=dx, dy=dy, flip=flip, threshold=threshold)
     pairs = list(zip(pred_masks[:n], gt_masks[:n]))
     with ThreadPoolExecutor(max_workers=8) as executor:
-        boundary_fs = list(executor.map(_compute_single_frame_bf, pairs))
+        boundary_fs = list(executor.map(lambda p: func(p[0], p[1]), pairs))
 
-    # 3. Flow warping error avec optimisation RAM
-    fwe = compute_flow_warping_error(
-        pred_masks[:n],
-        frames,
-        downsample_factor=downsample_factor
-    )
+    # 4. Flow warping error (streaming)
+    fwe = compute_flow_warping_error(pred_masks[:n], frames, threshold=threshold)
 
     return {
         "iou_mean": iou_global,

@@ -207,7 +207,8 @@ def _load_ground_truth_masks(gt_dir: Path, num_frames: int) -> List[np.ndarray]:
             if use_chroma is None:
                 use_chroma = False
             gray = frame
-        return gray.astype(np.float32) / 255.0
+        return gray.astype(np.uint8)
+
 
     if gt_dir.is_dir():
         image_exts = {".png", ".jpg", ".jpeg", ".bmp", ".tiff"}
@@ -239,12 +240,11 @@ def _load_ground_truth_masks(gt_dir: Path, num_frames: int) -> List[np.ndarray]:
                 
                 # Nettoyage morphologique léger pour les bords
                 kernel = np.ones((3, 3), np.uint8)
-                human_mask = cv2.morphologyEx(human_mask, cv2.MORPH_OPEN, kernel)
-                masks.append(human_mask.astype(np.float32) / 255.0)
+                masks.append(human_mask.astype(np.uint8))
             else:
                 # C'est probablement déjà un masque binaire ou niveaux de gris
                 gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                masks.append(gray.astype(np.float32) / 255.0)
+                masks.append(gray.astype(np.uint8))
         cap.release()
 
 
@@ -477,7 +477,7 @@ def load_masks_from_mask_video(mask_video_path: Path) -> List[np.ndarray]:
         if not ret:
             break
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        masks.append(gray.astype(np.float32) / 255.0)
+        masks.append(gray.astype(np.uint8))
     cap.release()
     return masks
 
@@ -703,6 +703,7 @@ def run_benchmark(
     save_video: bool = False,
     save_segmented: bool = False,
     progress_callback: Optional[Callable[[int, int, str], None]] = None,
+    on_result: Optional[Callable[[Dict], None]] = None,
 ) -> List[Dict]:
     """
     Exécute le benchmark complet pour tous les modèles sur toutes les vidéos.
@@ -739,7 +740,7 @@ def run_benchmark(
         if random_selection:
             random.shuffle(datasets)
         
-        if num_videos is not None:
+        if num_videos is not None and num_videos > 0:
             datasets = datasets[:num_videos]
             logger.info("Traitement de %d vidéos (sélection %s).", 
                         len(datasets), "aléatoire" if random_selection else "ordonnée")
@@ -890,6 +891,9 @@ def run_benchmark(
             current_combo += 1
             if progress_callback:
                 progress_callback(current_combo, total_combos, f"Traité : {model.name} / {video_path.name}")
+            
+            if on_result:
+                on_result(result_entry)
 
         # Libérer le modèle
         model.cleanup()

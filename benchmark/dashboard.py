@@ -56,7 +56,7 @@ from benchmark.runner import (
     load_masks_from_mask_video,
     run_benchmark,
 )
-from benchmark.config import GROUND_TRUTH_DIR, OUTPUT_DIR, TEMP_RESULTS_DIR, VIDEOS_DIR
+from benchmark.config import DATASETS, GROUND_TRUTH_DIR, OUTPUT_DIR, TEMP_RESULTS_DIR, VIDEOS_DIR
 
 # ── Page config ──────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -157,7 +157,7 @@ def _scatter_chart(df: pd.DataFrame):
         .properties(title="Qualité vs Latence (bulles ∝ FLOPs)", height=400)
         .interactive()
     )
-    st.altair_chart(chart, width='stretch')
+    st.altair_chart(chart, use_container_width=True)
 
 
 def _build_zip_bytes(output_dir: Path) -> bytes:
@@ -243,6 +243,17 @@ def _t2_live_panel(count_pairs: int):
 # ── Sidebar shared config ─────────────────────────────────────────────────────
 st.sidebar.title("⚙️ Configuration")
 
+# Dataset selection
+selected_ds = st.sidebar.selectbox(
+    "📂 Dataset source",
+    options=list(DATASETS.keys()),
+    index=0,
+    help="Choisissez le dossier source des vidéos et du Ground Truth."
+)
+curr_dataset_root = DATASETS[selected_ds]
+curr_videos_dir = curr_dataset_root / "videos"
+curr_gt_dir = curr_dataset_root / "ground_truth"
+
 # ── Tabs ─────────────────────────────────────────────────────────────────────
 tab1, tab2, tab3 = st.tabs([
     "🚀 Benchmark complet",
@@ -260,16 +271,46 @@ with tab1:
     # Sidebar for tab1
     with st.sidebar:
         st.subheader("📹 Vidéos")
-        available_datasets = discover_datasets(VIDEOS_DIR, GROUND_TRUTH_DIR)
+        available_datasets = discover_datasets(curr_videos_dir, curr_gt_dir)
         total_videos = len(available_datasets)
-        num_videos = st.number_input(
-            "Nombre de vidéos",
-            min_value=0, max_value=max(total_videos, 1),
-            value=min(1, total_videos),
-            help="0 = toutes",
-            key="t1_num_videos",
+        
+        sel_mode = st.radio(
+            "Mode de sélection",
+            options=["Toutes", "Aléatoire", "Plage (Index)", "Manuelle"],
+            horizontal=True,
+            key="t1_sel_mode"
         )
-        use_shuffle = st.checkbox("Sélection aléatoire", value=True, key="t1_shuffle")
+        
+        video_indices = None
+        num_videos = 0
+        use_shuffle = False
+
+        if sel_mode == "Toutes":
+            num_videos = 0
+        elif sel_mode == "Aléatoire":
+            num_videos = st.number_input("Nombre de vidéos", 1, total_videos, min(10, total_videos), key="t1_num_v")
+            use_shuffle = True
+        elif sel_mode == "Plage (Index)":
+            idx_range = st.slider("Choisissez la plage", 0, total_videos - 1, (0, min(9, total_videos - 1)), key="t1_range")
+            video_indices = list(range(idx_range[0], idx_range[1] + 1))
+        elif sel_mode == "Manuelle":
+            text_input = st.text_input("Indices (ex: 0, 5-10, 22)", key="t1_manual_text")
+            video_indices = []
+            if text_input:
+                try:
+                    parts = [p.strip() for p in text_input.split(",")]
+                    for p in parts:
+                        if "-" in p:
+                            start, end = map(int, p.split("-"))
+                            video_indices.extend(range(start, end + 1))
+                        else:
+                            video_indices.append(int(p))
+                    # Filtrer les indices valides
+                    video_indices = [i for i in video_indices if 0 <= i < total_videos]
+                    # Retirer les doublons et trier
+                    video_indices = sorted(list(set(video_indices)))
+                except ValueError:
+                    st.error("Format invalide. Utilisez des nombres, virgules ou tirets (ex: 0, 5-10).")
 
         st.divider()
         st.subheader("💾 Options export")
@@ -350,7 +391,7 @@ with tab1:
                     models=models,
                     videos_dir=curr_videos_dir,
                     gt_dir=curr_gt_dir,
-                    num_videos=num_videos_arg,
+                    num_videos=num_videos,
                     random_selection=use_shuffle,
                     video_indices=video_indices,
                     save_masks=save_masks,
@@ -464,8 +505,8 @@ with tab2:
                 try:
                     compute_metrics_on_output(
                         output_dir=OUTPUT_DIR,
-                        gt_dir=GROUND_TRUTH_DIR,
-                        videos_dir=VIDEOS_DIR,
+                        gt_dir=curr_gt_dir,
+                        videos_dir=curr_videos_dir,
                         model_filter=_dirs,
                         threshold=_threshold,
                         measure_missing_latency=True,
@@ -533,8 +574,8 @@ with tab3:
             )
 
         if chosen_model and chosen_video:
-            src_path  = VIDEOS_DIR / f"{chosen_video}.mp4"
-            gt_path   = GROUND_TRUTH_DIR / f"{chosen_video}.mp4"
+            src_path  = curr_videos_dir / f"{chosen_video}.mp4"
+            gt_path   = curr_gt_dir / f"{chosen_video}.mp4"
             mask_path = masks_root3 / chosen_model / f"{chosen_video}_{chosen_model}_mask.mp4"
 
             # Frame count (use source video as reference)

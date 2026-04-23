@@ -7,7 +7,8 @@ import cv2
 import numpy as np
 
 from .base import BaseModelWrapper
-from .mediapipe_model import MediapipeLandscapeWrapper, MediapipePoseWrapper
+from .mediapipe_selfie import MediapipeLandscapeWrapper
+from .mediapipe_pose import MediapipePoseWrapper
 
 logger = logging.getLogger(__name__)
 

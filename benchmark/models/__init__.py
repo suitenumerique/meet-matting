@@ -8,11 +8,11 @@ Chaque wrapper hérite de BaseModelWrapper et implémente :
 """
 
 from .base import BaseModelWrapper
-from .mediapipe_model import (
+from .mediapipe_selfie import (
     MediapipeLandscapeWrapper,
     MediapipePortraitWrapper,
-    MediapipeSelfieMulticlassWrapper,
 )
+from .mediapipe_multiclass import MediapipeSelfieMulticlassWrapper
 from .rvm import RVMWrapper
 from .mobilenetv3_lraspp import MobileNetV3LRASPPWrapper
 from .trimap_matting import TrimapMattingWrapper
