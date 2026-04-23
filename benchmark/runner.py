@@ -19,7 +19,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 from tqdm import tqdm
-from typing import Dict, Iterable, List, Optional, Tuple, Generator
+from typing import Callable, Dict, Iterable, List, Optional, Tuple, Generator
 import itertools
 from concurrent.futures import ThreadPoolExecutor
 import threading
@@ -62,6 +62,32 @@ def _get_video_info(video_path: Path) -> Tuple[int, float, Tuple[int, int]]:
     h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     cap.release()
     return num_frames, fps, (w, h)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Ground-Truth format helpers (chroma key)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+def _is_chroma_key(frame_bgr: np.ndarray, threshold: float = 0.15) -> bool:
+    """Return True if ≥threshold of pixels fall in the HSV green range."""
+    hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
+    green = cv2.inRange(hsv, (35, 50, 50), (85, 255, 255))
+    return float(green.sum()) / (255.0 * green.size) >= threshold
+
+
+def _chroma_key_to_mask(frame_bgr: np.ndarray) -> np.ndarray:
+    """Convert a chroma-key frame (green bg) to a float32 [0,1] foreground mask."""
+    hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
+    green = cv2.inRange(hsv, (35, 50, 50), (85, 255, 255))
+    return cv2.bitwise_not(green).astype(np.float32) / 255.0
+
+
+def get_frame_at(video_path: Path, frame_idx: int) -> Optional[np.ndarray]:
+    """Return a single BGR frame at index frame_idx, or None on failure."""
+    cap = cv2.VideoCapture(str(video_path))
+    cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+    ret, frame = cap.read()
+    cap.release()
+    return frame if ret else None
 
 
 class VideoPrefetcher:
@@ -148,23 +174,48 @@ def _read_video_frames(video_path: Path) -> Tuple[List[np.ndarray], float]:
 
 def _load_ground_truth_masks(gt_dir: Path, num_frames: int) -> List[np.ndarray]:
     """
-    Charge les masques GT depuis un répertoire ou une vidéo.
-    
-    Si le GT est une vidéo couleur, on applique un traitement de type Chromakey 
-    pour extraire l'humain (tout ce qui n'est ni vert ni noir).
+    Load GT masks from a directory or video file.
+
+    Supports two formats:
+      - Folder of images (PNG/JPG) sorted by name.
+      - Video file (each frame = a mask).
+
+    GT format is auto-detected on the first frame:
+      - If ≥15 % of pixels are green (chroma-key), the foreground is extracted
+        by inverting the green mask (person = 1.0, green bg = 0.0).
+      - Otherwise the frame is converted to greyscale and normalised to [0, 1].
+
+    Returns:
+        List of float32 masks in [0, 1], of length min(available, num_frames).
     """
     masks = []
+    use_chroma: Optional[bool] = None  # determined on first readable frame
+
+    def _frame_to_mask(frame: np.ndarray) -> np.ndarray:
+        nonlocal use_chroma
+        if frame.ndim == 3 and frame.shape[2] >= 3:
+            if use_chroma is None:
+                use_chroma = _is_chroma_key(frame)
+                logger.info(
+                    "GT format auto-detected: %s",
+                    "chroma-key green" if use_chroma else "greyscale mask",
+                )
+            if use_chroma:
+                return _chroma_key_to_mask(frame)
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        else:
+            if use_chroma is None:
+                use_chroma = False
+            gray = frame
+        return gray.astype(np.float32) / 255.0
 
     if gt_dir.is_dir():
-        # Mode dossier d'images
         image_exts = {".png", ".jpg", ".jpeg", ".bmp", ".tiff"}
-        files = sorted(
-            f for f in gt_dir.iterdir() if f.suffix.lower() in image_exts
-        )
+        files = sorted(f for f in gt_dir.iterdir() if f.suffix.lower() in image_exts)
         for f in files[:num_frames]:
-            img = cv2.imread(str(f), cv2.IMREAD_GRAYSCALE)
+            img = cv2.imread(str(f))
             if img is not None:
-                masks.append(img.astype(np.float32) / 255.0)
+                masks.append(_frame_to_mask(img))
     elif gt_dir.is_file():
         # Mode vidéo : On gère le cas des vidéos à fond vert (Green Screen)
         cap = cv2.VideoCapture(str(gt_dir))
@@ -409,6 +460,25 @@ def _load_masks(masks_dir: Path) -> List[np.ndarray]:
         img = cv2.imread(str(f), cv2.IMREAD_GRAYSCALE)
         if img is not None:
             masks.append(img.astype(np.float32) / 255.0)
+    return masks
+
+
+def load_masks_from_mask_video(mask_video_path: Path) -> List[np.ndarray]:
+    """
+    Reload float32 [0,1] masks from a *_mask.mp4 output file.
+
+    The mask MP4 was saved as a greyscale video encoded in RGB
+    (cv2.COLOR_GRAY2RGB). This function reverses that conversion.
+    """
+    masks = []
+    cap = cv2.VideoCapture(str(mask_video_path))
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        masks.append(gray.astype(np.float32) / 255.0)
+    cap.release()
     return masks
 
 
@@ -839,7 +909,235 @@ def run_benchmark(
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  Génération de rapports
+#  Post-hoc metrics on saved outputs
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+def _load_cached_latency(output_dir: Path) -> Dict[str, Dict]:
+    """Read per-model latency/FLOPs cached in benchmark_results.csv.
+
+    Returns a dict: model_name → {latency_p95_ms, latency_mean_ms,
+    latency_std_ms, flops_per_frame} (values may be None if not present).
+    """
+    csv_path = output_dir / RESULTS_CSV_FILENAME
+    if not csv_path.exists():
+        return {}
+
+    cache: Dict[str, Dict] = {}
+    with open(csv_path, newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            model = row.get("model", "").strip()
+            if not model or model in cache:
+                continue
+            entry: Dict = {}
+            for key in ("latency_p95_ms", "latency_mean_ms", "latency_std_ms", "flops_per_frame"):
+                raw = row.get(key, "").strip()
+                try:
+                    entry[key] = float(raw) if raw else None
+                except ValueError:
+                    entry[key] = None
+            # Only cache if at least one latency value is non-None and non-zero
+            if any(entry.get(k) for k in ("latency_p95_ms", "latency_mean_ms")):
+                cache[model] = entry
+    return cache
+
+
+def _find_model_class_by_dir_name(dir_name: str):
+    """Return the model *class* whose .name matches dir_name (with _ → space)."""
+    from .models import MODEL_REGISTRY
+
+    target = dir_name.replace("_", " ")
+    for cls in MODEL_REGISTRY.values():
+        try:
+            if cls().name == target:
+                return cls
+        except Exception:
+            continue
+    return None
+
+
+def compute_metrics_on_output(
+    output_dir: Path = OUTPUT_DIR,
+    gt_dir: Path = GROUND_TRUTH_DIR,
+    videos_dir: Path = VIDEOS_DIR,
+    model_filter: Optional[List[str]] = None,
+    threshold: float = 0.5,
+    measure_missing_latency: bool = True,
+    on_result: Optional[Callable[[Dict], None]] = None,
+    on_latency_status: Optional[Callable[[str], None]] = None,
+) -> List[Dict]:
+    """
+    Compute quality metrics on previously generated *_mask.mp4 files.
+
+    Latency/FLOPs are resolved in this order:
+      1. Read from benchmark_results.csv (cache).
+      2. If not cached and measure_missing_latency=True: load the model,
+         run measure_latency() on a reference video, then unload.
+      3. Otherwise left as None.
+
+    Args:
+        output_dir:               Root output directory (contains masks/).
+        gt_dir:                   Folder of ground-truth videos/images.
+        videos_dir:               Folder of source videos (needed for FWE).
+        model_filter:             If set, only process these model_dir names.
+        threshold:                Binarisation threshold forwarded to metrics.
+        measure_missing_latency:  Re-measure latency when not in CSV.
+        on_result:                Callback fired with each result dict.
+        on_latency_status:        Callback fired with status strings during
+                                  latency measurement.
+
+    Returns:
+        List of result dicts (same schema as run_benchmark).
+    """
+    from .metrics import compute_iou, compute_boundary_f_measure, compute_flow_warping_error
+
+    masks_root = output_dir / "masks"
+    if not masks_root.is_dir():
+        logger.warning("No masks/ folder found in %s", output_dir)
+        return []
+
+    # ── Step 0: load latency cache ────────────────────────────────────────────
+    latency_cache = _load_cached_latency(output_dir)
+    logger.info("Latency cache: %d models found in CSV.", len(latency_cache))
+
+    # Find one reference video for latency measurement (any will do)
+    ref_videos = sorted(videos_dir.glob("*.mp4")) if videos_dir.is_dir() else []
+    ref_video: Optional[Path] = ref_videos[0] if ref_videos else None
+
+    all_results: List[Dict] = []
+
+    model_dirs = sorted(
+        d for d in masks_root.iterdir()
+        if d.is_dir() and (model_filter is None or d.name in model_filter)
+    )
+
+    for model_dir in model_dirs:
+        model_name = model_dir.name.replace("_", " ")
+        mask_files = sorted(model_dir.glob("*_mask.mp4"))
+        if not mask_files:
+            continue
+
+        # ── Step 1: resolve latency for this model ────────────────────────────
+        lat_entry: Dict = latency_cache.get(model_name, {})
+
+        if not lat_entry and measure_missing_latency and ref_video is not None:
+            model_cls = _find_model_class_by_dir_name(model_dir.name)
+            if model_cls is not None:
+                try:
+                    msg = f"Mesure de la latence pour {model_name}…"
+                    logger.info(msg)
+                    if on_latency_status:
+                        on_latency_status(msg)
+
+                    model_inst = model_cls()
+                    model_inst.load()
+
+                    # FLOPs: use first frame resolution from the reference video
+                    _, _, (w_ref, h_ref) = _get_video_info(ref_video)
+                    flops = model_inst.get_flops((3, h_ref, w_ref))
+
+                    lat_result = measure_latency(model_inst, ref_video)
+                    lat_entry = {**lat_result, "flops_per_frame": flops}
+                    model_inst.cleanup()
+
+                    msg = f"Latence {model_name}: p95={lat_entry['latency_p95_ms']:.1f} ms"
+                    logger.info(msg)
+                    if on_latency_status:
+                        on_latency_status(msg)
+                except Exception as lat_err:
+                    logger.warning("Latency measurement failed for %s: %s", model_name, lat_err)
+                    if on_latency_status:
+                        on_latency_status(f"⚠️ Latence non disponible pour {model_name}: {lat_err}")
+            else:
+                logger.warning("Model class not found for dir '%s'.", model_dir.name)
+                if on_latency_status:
+                    on_latency_status(f"⚠️ Classe modèle introuvable pour {model_dir.name}")
+
+        # ── Step 2: compute quality metrics per video ─────────────────────────
+        for mask_file in mask_files:
+            video_stem = mask_file.stem.replace(f"_{model_dir.name}_mask", "")
+            gt_path = gt_dir / f"{video_stem}.mp4"
+            video_path = videos_dir / f"{video_stem}.mp4"
+
+            result_entry: Dict = {
+                "model": model_name,
+                "video": f"{video_stem}.mp4",
+                "status": "OK",
+                **lat_entry,
+            }
+
+            try:
+                pred_masks = load_masks_from_mask_video(mask_file)
+                if not pred_masks:
+                    raise ValueError(f"No frames in {mask_file}")
+
+                gt_masks = _load_ground_truth_masks(gt_path, len(pred_masks)) if gt_path.exists() else []
+
+                if not gt_masks:
+                    logger.warning("No GT found for %s.", video_stem)
+                    result_entry["status"] = "NO_GT"
+                    all_results.append(result_entry)
+                    if on_result:
+                        try:
+                            on_result(result_entry)
+                        except Exception:
+                            pass
+                    continue
+
+                n = min(len(pred_masks), len(gt_masks))
+
+                iou = compute_iou(pred_masks[:n], gt_masks[:n], threshold=threshold)
+
+                bf_scores = [
+                    compute_boundary_f_measure(p, g, threshold=threshold)
+                    for p, g in zip(pred_masks[:n], gt_masks[:n])
+                ]
+
+                fwe = 0.0
+                if video_path.exists():
+                    fwe = compute_flow_warping_error(
+                        pred_masks[:n],
+                        _iter_video_frames(video_path),
+                        threshold=threshold,
+                    )
+                else:
+                    logger.warning("Source video not found for FWE: %s", video_path)
+
+                result_entry.update({
+                    "iou_mean": round(iou, 4),
+                    "iou_std": 0.0,
+                    "boundary_f_mean": round(float(np.mean(bf_scores)), 4),
+                    "boundary_f_std": round(float(np.std(bf_scores)), 4),
+                    "flow_warping_error": round(fwe, 4),
+                    "num_frames": n,
+                    "threshold": threshold,
+                })
+
+                logger.info(
+                    "%s / %s — IoU=%.4f  BF=%.4f  FWE=%.4f",
+                    model_name, video_stem, iou, np.mean(bf_scores), fwe,
+                )
+
+            except Exception as e:
+                logger.error("metrics error %s / %s: %s", model_name, video_stem, e)
+                result_entry["status"] = "ERROR"
+                result_entry["error"] = str(e)
+
+            all_results.append(result_entry)
+            if on_result is not None:
+                try:
+                    on_result(result_entry)
+                except Exception as cb_exc:
+                    logger.debug("on_result callback error: %s", cb_exc)
+
+    _save_csv_report(all_results, output_dir)
+    _save_json_report(all_results, output_dir)
+    logger.info("Post-hoc metrics done: %d results saved.", len(all_results))
+    return all_results
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Report generation
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def _save_csv_report(results: List[Dict], output_dir: Path) -> None:
     """Sauvegarde les résultats en CSV."""

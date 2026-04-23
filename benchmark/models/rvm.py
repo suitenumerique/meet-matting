@@ -82,10 +82,7 @@ class RVMWrapper(BaseModelWrapper):
         for p in selected_providers:
             if p == "CoreMLExecutionProvider":
                 actual_providers.append(
-                    ("CoreMLExecutionProvider", {
-                        "MLComputeUnits": "ALL",
-                        "convert_model_to_fp16": True  # Enable FP16 inference on Mac
-                    })
+                    ("CoreMLExecutionProvider", {"MLComputeUnits": "ALL"})
                 )
             else:
                 actual_providers.append(p)
