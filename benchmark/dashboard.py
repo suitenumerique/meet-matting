@@ -8,6 +8,11 @@ Offre une interface moderne pour :
   - Visualiser les résultats en temps réel.
 """
 
+import os
+# Désactivation TOTALE des logs MediaPipe/GLog au démarrage
+os.environ['GLOG_minloglevel'] = '2'
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+
 import streamlit as st
 import pandas as pd
 import sys

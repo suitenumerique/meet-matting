@@ -3,8 +3,12 @@ Wrappers pour les modèles MediaPipe de segmentation et pose.
 """
 
 import logging
+import os
 from pathlib import Path
 from typing import Optional, Tuple
+
+# Désactiver le spam de logs MediaPipe / GLog (INFO=0, WARN=1, ERROR=2, FATAL=3)
+os.environ['GLOG_minloglevel'] = '2'
 
 import cv2
 import numpy as np
@@ -47,6 +51,7 @@ _LIMB_CONNECTIONS = [
 class _BaseMediapipeWrapper(BaseModelWrapper):
     _variant: str = ""
     _segmenter = None
+    _frame_count = 0
 
     @property
     def input_size(self) -> Optional[Tuple[int, int]]:
@@ -72,7 +77,7 @@ class _BaseMediapipeWrapper(BaseModelWrapper):
         options = ImageSegmenterOptions(
             base_options=BaseOptions(
                 model_asset_path=str(local_path),
-                delegate=BaseOptions.Delegate.GPU # On retente le GPU avec le fix RGBA
+                delegate=BaseOptions.Delegate.GPU
             ),
             running_mode=RunningMode.VIDEO, 
             output_category_mask=False,
@@ -80,31 +85,56 @@ class _BaseMediapipeWrapper(BaseModelWrapper):
         )
         self._segmenter = ImageSegmenter.create_from_options(options)
         self._mp = mp
-        self.reset_state()
+        self._frame_count = 0
 
     def reset_state(self) -> None:
-        """Remet à zéro le compteur pour le mode VIDEO."""
+        """Réinitialise complètement MediaPipe pour une nouvelle vidéo."""
         self._frame_count = 0
+        if self._segmenter is not None:
+            try:
+                self._segmenter.close()
+            except: pass
+            self._segmenter = None
+            self.load()
 
     def get_flops(self, input_shape: Tuple[int, int, int] = (3, 256, 256)) -> float:
         estimates = {"portrait": 7.5e6, "selfie_multiclass": 9.2e6, "landscape": 8.1e6}
         return estimates.get(self._variant, 8.0e6)
 
     def predict(self, frame_bgr: np.ndarray, frame_rgb: Optional[np.ndarray] = None) -> np.ndarray:
-        if self._segmenter is None: return None
-        h_orig, w_orig = frame_bgr.shape[:2]
-        
-        # FIX GPU : MediaPipe GPU sur Mac exige souvent du RGBA (4 canaux)
-        frame_small = cv2.resize(frame_bgr, (256, 256), interpolation=cv2.INTER_NEAREST)
-        frame_small_rgba = cv2.cvtColor(frame_small, cv2.COLOR_BGR2RGBA)
+        if self._segmenter is None: 
+            return None
             
-        # Utilisation du format SRGBA pour correspondre au delegate GPU
-        mp_image = self._mp.Image(image_format=self._mp.ImageFormat.SRGBA, data=frame_small_rgba)
-        
-        # On utilise le timestamp pour le RunningMode.VIDEO (indispensable en GPU)
-        timestamp_ms = int(self._frame_count * (1000 / 30))
-        result = self._segmenter.segment_for_video(mp_image, timestamp_ms)
-        self._frame_count += 1
+        try:
+            h_orig, w_orig = frame_bgr.shape[:2]
+            frame_small = cv2.resize(frame_bgr, (256, 256), interpolation=cv2.INTER_NEAREST)
+            frame_small_rgba = cv2.cvtColor(frame_small, cv2.COLOR_BGR2RGBA)
+            
+            mp_image = self._mp.Image(image_format=self._mp.ImageFormat.SRGBA, data=frame_small_rgba)
+            
+            # Timestamp archi-sécurisé
+            count = getattr(self, "_frame_count", 0)
+            if count is None: count = 0
+            ts = int(count * (1000 / 30))
+            
+            result = self._segmenter.segment_for_video(mp_image, ts)
+            self._frame_count = count + 1
+
+            if result and result.confidence_masks:
+                if self._variant == "selfie_multiclass" and len(result.confidence_masks) > 1:
+                    mask_small = 1.0 - result.confidence_masks[0].numpy_view()
+                else:
+                    mask_small = result.confidence_masks[0].numpy_view()
+                
+                if mask_small.shape[:2] != (h_orig, w_orig):
+                    return cv2.resize(mask_small, (w_orig, h_orig), interpolation=cv2.INTER_NEAREST).astype(np.float32)
+                return mask_small.astype(np.float32)
+            
+            return np.zeros((h_orig, w_orig), dtype=np.float32)
+            
+        except Exception as e:
+            logger.error(f"Erreur interne MediaPipe: {e}")
+            return None
 
         if result.confidence_masks:
             if self._variant == "selfie_multiclass" and len(result.confidence_masks) > 1:

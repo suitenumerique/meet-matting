@@ -472,7 +472,17 @@ def run_inference(
                 latencies.append(latency)
             
             if collect_masks:
-                masks_in_ram.append((mask * 255).astype(np.uint8))
+                # SÉCURITÉ ABSOLUE : On vérifie que mask n'est pas None avant TOUTE opération
+                if mask is not None:
+                    try:
+                        mask_u8 = (mask * 255).astype(np.uint8)
+                        masks_in_ram.append(mask_u8)
+                    except Exception as e:
+                        logger.error(f"Erreur multiplication masque : {e}")
+                        masks_in_ram.append(np.zeros((h, w), dtype=np.uint8))
+                else:
+                    # Si le modèle a échoué (None), on met un masque noir au lieu de crasher
+                    masks_in_ram.append(np.zeros((h, w), dtype=np.uint8))
             
             frame_idx += 1
             pbar.update(1)
@@ -480,8 +490,7 @@ def run_inference(
             
         cap.release()
 
-    # Nettoyage
-    model.cleanup()
+    # Calcul des statistiques
     latencies_arr = np.array(latencies) if latencies else np.array([0.0])
     p95 = float(np.percentile(latencies_arr, LATENCY_PERCENTILE))
     flops = model.get_flops(input_shape)
