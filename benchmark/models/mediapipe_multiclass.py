@@ -20,6 +20,12 @@ _MODEL_URLS = {
 
 class MediapipeSelfieMulticlassWrapper(BaseMediapipeWrapper):
     _variant = "selfie_multiclass"
+    use_ema = True
+    ema_alpha = 0.5
+    use_guided_filter = True
+    use_cca = True
+    use_morphology = True
+    confidence_threshold = 0.6
 
     @property
     def name(self) -> str:
@@ -56,4 +62,5 @@ class MediapipeSelfieMulticlassWrapper(BaseMediapipeWrapper):
         )
         self._segmenter = ImageSegmenter.create_from_options(options)
         self._mp = mp
+        self._frame_count = 0
         self._frame_count = 0

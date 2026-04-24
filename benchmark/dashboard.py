@@ -315,8 +315,16 @@ with tab1:
         st.divider()
         st.subheader("💾 Options export")
         save_masks    = st.checkbox("Sauvegarder PNG", value=False, key="t1_masks")
-        save_video    = st.checkbox("Sauvegarder masques (.mp4)", value=False, key="t1_video")
-        save_segmented = st.checkbox("Sauvegarder sujet (.mp4)", value=True, key="t1_seg")
+        save_video    = st.checkbox("Sauvegarder masques (.mp4)", value=True, key="t1_video")
+        save_segmented = st.checkbox("Sauvegarder sujet (.mp4)", value=False, key="t1_seg")
+        save_debug    = st.checkbox("Sauvegarder débug (IoU)", value=False, key="t1_debug")
+
+        st.divider()
+        st.subheader("⚙️ Post-processing (MediaPipe)")
+        pp_ema = st.checkbox("EMA (Lissage temporel)", value=True, help="Réduit le scintillement entre les frames.", key="t1_pp_ema")
+        pp_gf  = st.checkbox("Guided Filter (Contours)", value=True, help="Affinement des bords (plus net mais un peu plus lent).", key="t1_pp_gf")
+        pp_cca = st.checkbox("CCA (Suppression bruit)", value=True, help="Supprime les petits éléments isolés en arrière-plan.", key="t1_pp_cca")
+        pp_morph = st.checkbox("Morphologie (Trous)", value=True, help="Bouche les petits trous dans le masque.", key="t1_pp_morph")
 
     # ── Model selection ──
     col_models, col_run = st.columns([1, 2])
@@ -382,7 +390,15 @@ with tab1:
                     st.subheader(f"📊 Résultats en cours… ({len(results_so_far)} terminé(s))")
                     st.dataframe(_styled_df(df_live), width='stretch')
 
-            models = [MODEL_REGISTRY[k]() for k in selected_models]
+            models = []
+            for k in selected_models:
+                m = MODEL_REGISTRY[k]()
+                # Injection dynamique des paramètres de post-processing
+                if hasattr(m, "use_ema"): m.use_ema = pp_ema
+                if hasattr(m, "use_guided_filter"): m.use_guided_filter = pp_gf
+                if hasattr(m, "use_cca"): m.use_cca = pp_cca
+                if hasattr(m, "use_morphology"): m.use_morphology = pp_morph
+                models.append(m)
 
             with st.status("🛠️ Benchmark en cours…", expanded=True) as status_box:
                 st.write("Initialisation des modèles…")
@@ -397,6 +413,7 @@ with tab1:
                     save_masks=save_masks,
                     save_video=save_video,
                     save_segmented=save_segmented,
+                    save_debug=save_debug,
                     on_result=_on_result_t1,
                 )
                 elapsed = time.time() - t_start

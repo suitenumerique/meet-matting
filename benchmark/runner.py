@@ -530,10 +530,8 @@ def run_inference(
             if not ret: break
             
             t_start = time.perf_counter()
-            # On resize directement ici pour être le plus rapide possible
-            if target_size:
-                frame = cv2.resize(frame, target_size, interpolation=cv2.INTER_NEAREST)
-            
+            # On laisse le modèle gérer son propre redimensionnement (contrat BaseModelWrapper)
+            # Cela garantit que le masque retourné correspond à la taille originale de la frame
             mask = model.predict(frame)
             t_end = time.perf_counter()
             
@@ -542,16 +540,20 @@ def run_inference(
                 latencies.append(latency)
             
             if collect_masks:
-                # SÉCURITÉ ABSOLUE : On vérifie que mask n'est pas None avant TOUTE opération
+                # SÉCURITÉ : On vérifie que mask n'est pas None avant TOUTE opération
                 if mask is not None:
                     try:
+                        # On s'assure que le masque a la bonne taille (h, w de la vidéo originale)
+                        if mask.shape[:2] != (h, w):
+                            mask = cv2.resize(mask, (w, h), interpolation=cv2.INTER_LINEAR)
+                        
                         mask_u8 = (mask * 255).astype(np.uint8)
                         masks_in_ram.append(mask_u8)
                     except Exception as e:
-                        logger.error(f"Erreur multiplication masque : {e}")
+                        logger.error(f"Erreur processing masque {model.name} : {e}")
                         masks_in_ram.append(np.zeros((h, w), dtype=np.uint8))
                 else:
-                    # Si le modèle a échoué (None), on met un masque noir au lieu de crasher
+                    # Si le modèle a échoué (None), on met un masque noir aux dimensions de la vidéo
                     masks_in_ram.append(np.zeros((h, w), dtype=np.uint8))
             
             frame_idx += 1
@@ -702,6 +704,7 @@ def run_benchmark(
     save_masks: bool = False,
     save_video: bool = False,
     save_segmented: bool = False,
+    save_debug: bool = False,
     progress_callback: Optional[Callable[[int, int, str], None]] = None,
     on_result: Optional[Callable[[Dict], None]] = None,
 ) -> List[Dict]:
@@ -871,7 +874,7 @@ def run_benchmark(
                         logger.info("🎨 Vidéo détourée sauvegardée : %s", seg_video_path)
 
                     # ── Vidéos de DEBUG EVAL (Intersection / Union) ──
-                    if gt_masks and len(gt_masks) > 0:
+                    if save_debug and gt_masks and len(gt_masks) > 0:
                         frames_list_debug, _ = _read_video_frames(video_path)
                         _save_eval_debug_videos(m_temp, gt_masks, frames_list_debug, dest_base, fps)
 

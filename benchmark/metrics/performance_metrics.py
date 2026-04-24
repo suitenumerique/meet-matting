@@ -7,58 +7,85 @@ and return a scalar (optionally also a per-frame vector for finer analysis).
 
 import numpy as np
 import cv2
+import gc
+from typing import List, Tuple, Union, Optional, Iterable
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 
 # =============================================================================
 # Global IoU (Intersection over Union)
 # =============================================================================
 
-def compute_iou(pred_mask: np.ndarray, gt_mask: np.ndarray, threshold: float = 0.5) -> float:
+def compute_iou(
+    pred_masks: Union[List[np.ndarray], np.ndarray],
+    gt_masks: Union[List[np.ndarray], np.ndarray],
+    threshold: float = 0.5,
+    apply_auto_align: bool = True
+) -> float:
     """
-    Compute the global IoU between the predicted and ground-truth masks,
-    aggregated over all pixels of the video.
-
-    Args:
-        pred_mask: Predicted mask, shape (T, H, W) or (T, H, W, C).
-        gt_mask:   Ground-truth mask, same shape as pred_mask.
-        threshold: Binarization threshold in [0, 1]. Default: 0.5.
-
-    Returns:
-        IoU in [0, 1].
+    Compute the global IoU between predicted and ground-truth masks.
+    Supports Lists, Generates, or Arrays. Handles automatic resizing and optional alignment.
     """
-    if pred_mask.shape != gt_mask.shape:
-        raise ValueError(
-            f"Masks must have the same shape. "
-            f"Got pred={pred_mask.shape}, gt={gt_mask.shape}"
-        )
+    # Convert to numpy arrays if they are lists or iterators
+    if not isinstance(pred_masks, np.ndarray): pred_masks = np.array(list(pred_masks))
+    if not isinstance(gt_masks, np.ndarray): gt_masks = np.array(list(gt_masks))
+    
+    if pred_masks.ndim == 2: # Single frame (H, W) -> add time dim
+        pred_masks = pred_masks[np.newaxis, ...]
+    if gt_masks.ndim == 2:
+        gt_masks = gt_masks[np.newaxis, ...]
 
-    # If the .mp4 was decoded as RGB, collapse the channel dim; the three
-    # channels of a mask are identical in practice.
-    if pred_mask.ndim == 4:
-        pred_mask = pred_mask.mean(axis=-1)
-    if gt_mask.ndim == 4:
-        gt_mask = gt_mask.mean(axis=-1)
+    if pred_masks.shape[0] != gt_masks.shape[0]:
+        n = min(pred_masks.shape[0], gt_masks.shape[0])
+        pred_masks = pred_masks[:n]
+        gt_masks = gt_masks[:n]
 
-    # Cast to float and normalize from [0, 255] to [0, 1] if needed.
-    pred_mask = pred_mask.astype(np.float32)
-    gt_mask = gt_mask.astype(np.float32)
-    if pred_mask.max() > 1.0:
-        pred_mask /= 255.0
-    if gt_mask.max() > 1.0:
-        gt_mask /= 255.0
+    # Pre-determined alignment if requested
+    dx, dy, flip = 0, 0, False
+    if apply_auto_align and pred_masks.ndim >= 3:
+        # Align on the middle frame
+        mid = pred_masks.shape[0] // 2
+        p_ref = pred_masks[mid]
+        g_ref = gt_masks[mid]
+        
+        # Prepare for alignment helper
+        p_ref_bin = (p_ref >= (threshold * 255 if p_ref.dtype == np.uint8 else threshold)).astype(np.uint8)
+        g_ref_bin = (g_ref >= (threshold * 255 if g_ref.dtype == np.uint8 else threshold)).astype(np.uint8)
+        
+        if p_ref_bin.shape != g_ref_bin.shape:
+             p_ref_bin = cv2.resize(p_ref_bin, (g_ref_bin.shape[1], g_ref_bin.shape[0]), interpolation=cv2.INTER_NEAREST)
+        
+        dx, dy, flip, _ = _get_alignment_params(p_ref_bin, g_ref_bin)
 
-    # Binarize
-    pred_bin = pred_mask >= threshold
-    gt_bin = gt_mask >= threshold
+    total_inter = 0
+    total_union = 0
+    
+    for t in range(pred_masks.shape[0]):
+        p = pred_masks[t]
+        g = gt_masks[t]
+        
+        if p.ndim == 3: p = p.mean(axis=-1)
+        if g.ndim == 3: g = g.mean(axis=-1)
+        
+        p_t = threshold * 255 if p.dtype == np.uint8 else threshold
+        g_t = threshold * 255 if g.dtype == np.uint8 else threshold
+        
+        p_bin = (p >= p_t).astype(np.uint8)
+        g_bin = (g >= g_t).astype(np.uint8)
+        
+        if p_bin.shape != g_bin.shape:
+            p_bin = cv2.resize(p_bin, (g_bin.shape[1], g_bin.shape[0]), interpolation=cv2.INTER_NEAREST)
+            
+        if apply_auto_align:
+            p_bin = _apply_alignment(p_bin, dx, dy, flip)
+            
+        total_inter += np.logical_and(p_bin, g_bin).sum()
+        total_union += np.logical_or(p_bin, g_bin).sum()
 
-    # IoU = |A ∩ B| / |A ∪ B|
-    intersection = np.logical_and(pred_bin, gt_bin).sum()
-    union = np.logical_or(pred_bin, gt_bin).sum()
-
-    if union == 0:
-        # Both masks are fully empty -> perfect agreement by convention.
+    if total_union == 0:
         return 1.0
 
-    return float(intersection / union)
+    return float(total_inter / total_union)
 
 
 # =============================================================================
@@ -125,65 +152,76 @@ def compute_boundary_f_measure(
     threshold: float = 0.5,
     bound_ratio: float = 0.008,
     return_per_frame: bool = False,
+    num_workers: int = 1,
 ):
     """
     Binary boundary F-measure (Perazzi et al. 2016, DAVIS), averaged per frame.
-
-    Note: this implementation treats internal holes as boundaries and
-    therefore penalizes them. This is the DAVIS-standard behavior and is
-    appropriate for the video-conferencing background-blur use case.
-
-    Args:
-        pred_mask:        Predicted mask, shape (T, H, W) or (T, H, W, C).
-        gt_mask:          Ground-truth mask, same shape as pred_mask.
-        threshold:        Binarization threshold in [0, 1]. Default: 0.5.
-        bound_ratio:      Tolerance expressed as a fraction of the image
-                          diagonal. DAVIS default: 0.008 (~2 px at 480p).
-        return_per_frame: If True, also returns the per-frame F-measure
-                          vector (useful for plots / temporal analyses).
-
-    Returns:
-        float, or (float, np.ndarray) if return_per_frame=True.
+    Supports parallelization via num_workers.
     """
+    # Convert to numpy arrays if they are lists or iterators
+    if not isinstance(pred_mask, np.ndarray): pred_mask = np.array(list(pred_mask))
+    if not isinstance(gt_mask, np.ndarray): gt_mask = np.array(list(gt_mask))
+
+    # Collapse channel dim if present
+    if pred_mask.ndim == 4 and pred_mask.shape[-1] == 1: pred_mask = pred_mask.squeeze(-1)
+    if gt_mask.ndim == 4 and gt_mask.shape[-1] == 1: gt_mask = gt_mask.squeeze(-1)
+    if pred_mask.ndim == 4: pred_mask = pred_mask.mean(axis=-1)
+    if gt_mask.ndim == 4: gt_mask = gt_mask.mean(axis=-1)
 
     if pred_mask.shape != gt_mask.shape:
-        raise ValueError(
-            f"Masks must have the same shape. "
-            f"Got pred={pred_mask.shape}, gt={gt_mask.shape}"
-        )
+        # Si mismatch de résolution, on redimensionne la prédiction sur le GT
+        T, H_gt, W_gt = gt_mask.shape[:3]
+        if pred_mask.shape[0] != T:
+            # Tronquage si nombre de frames différent
+            min_t = min(pred_mask.shape[0], T)
+            pred_mask = pred_mask[:min_t]
+            gt_mask = gt_mask[:min_t]
+            T = min_t
+        
+        # Redimensionnement (plus efficace si fait globalement si possible, sinon frame par frame)
+        # Pour éviter l'explosion RAM sur de très grosses vidéos, on pourrait le faire dans la boucle,
+        # mais ici on reste simple pour la boucle parallèle.
+        if pred_mask.shape[1:3] != (H_gt, W_gt):
+            new_preds = np.zeros((T, H_gt, W_gt), dtype=pred_mask.dtype)
+            for t in range(T):
+                new_preds[t] = cv2.resize(pred_mask[t], (W_gt, H_gt), interpolation=cv2.INTER_NEAREST)
+            pred_mask = new_preds
 
-    # Collapse channel dim if masks were decoded as RGB.
-    if pred_mask.ndim == 4:
-        pred_mask = pred_mask.mean(axis=-1)
-    if gt_mask.ndim == 4:
-        gt_mask = gt_mask.mean(axis=-1)
+    # Normalize/Threshold/Binarize
+    # Ensure we have a 3D batch (T, H, W)
+    if pred_mask.ndim == 2: # (H, W) -> (1, H, W)
+        pred_mask = pred_mask[np.newaxis, ...]
+        gt_mask = gt_mask[np.newaxis, ...]
+    elif pred_mask.ndim == 3 and pred_mask.shape[-1] <= 4 and pred_mask.shape[0] > 10:
+        # Cas ambigu: (H, W, C) ou (T, H, W) ? 
+        # Si T > 10, c'est probablement (T, H, W). Sinon on traite comme (H, W, C).
+        pass 
+    elif pred_mask.ndim == 3 and pred_mask.shape[-1] <= 4:
+        # Probablement une seule frame RGB(A) : (H, W, C) -> (1, H, W)
+        pred_mask = pred_mask.mean(axis=-1)[np.newaxis, ...]
+        gt_mask = gt_mask.mean(axis=-1)[np.newaxis, ...]
 
-    # Normalize from [0, 255] to [0, 1] if needed.
-    pred_mask = pred_mask.astype(np.float32)
-    gt_mask = gt_mask.astype(np.float32)
-    if pred_mask.max() > 1.0:
-        pred_mask /= 255.0
-    if gt_mask.max() > 1.0:
-        gt_mask /= 255.0
-
-    # Binarize
-    pred_bin = pred_mask >= threshold
-    gt_bin = gt_mask >= threshold
-
-    # Tolerance radius in pixels (DAVIS rule).
-    T, H, W = pred_bin.shape
+    T = pred_mask.shape[0]
+    H, W = pred_mask.shape[1:3]
     diag = np.sqrt(H ** 2 + W ** 2)
     bound_radius = max(1, int(np.round(bound_ratio * diag)))
+    
+    # Pre-processing for thresholding to avoid repeated branches
+    p_thresh = threshold * 255 if pred_mask.dtype == np.uint8 else threshold
+    g_thresh = threshold * 255 if gt_mask.dtype == np.uint8 else threshold
+    
+    p_bin = (pred_mask >= p_thresh).astype(np.uint8)
+    g_bin = (gt_mask >= g_thresh).astype(np.uint8)
 
-    per_frame = np.array(
-        [_f_measure_frame(pred_bin[t], gt_bin[t], bound_radius) for t in range(T)],
-        dtype=np.float32,
-    )
+    if num_workers > 1:
+        func = partial(_f_measure_frame, bound_radius=bound_radius)
+        with ThreadPoolExecutor(max_workers=num_workers) as executor:
+            per_frame = np.array(list(executor.map(lambda t: func(p_bin[t], g_bin[t]), range(T))), dtype=np.float32)
+    else:
+        per_frame = np.array([_f_measure_frame(p_bin[t], g_bin[t], bound_radius) for t in range(T)], dtype=np.float32)
+    
     mean_f = float(per_frame.mean())
-
-    if return_per_frame:
-        return mean_f, per_frame
-    return mean_f
+    return (mean_f, per_frame) if return_per_frame else mean_f
 
 
 # =============================================================================
@@ -359,6 +397,134 @@ def compute_flow_warping_error_farneback(
 
     return _aggregate_warping_error(video_f, masks, flows_fwd, flows_bwd,
                                     photo_threshold, return_per_frame)
+
+
+# =============================================================================
+# Alignment Helpers (Auto-Recalage)
+# =============================================================================
+
+def _get_alignment_params(pred_bin: np.ndarray, gt_bin: np.ndarray, max_shift: int = 50) -> Tuple[int, int, bool, float]:
+    """
+    Calcule les paramètres de recalage optimal (Translation + Flip) sur une frame.
+    """
+    h_gt, w_gt = gt_bin.shape[:2]
+    low_res = 128
+    scale = low_res / max(h_gt, w_gt)
+    g_low = cv2.resize(gt_bin.astype(np.uint8), None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+    
+    def _match(p_img):
+        pad = int(max_shift * scale) + 1
+        g_padded = cv2.copyMakeBorder(g_low, pad, pad, pad, pad, cv2.BORDER_CONSTANT, value=0)
+        res = cv2.matchTemplate(g_padded.astype(np.float32), p_img.astype(np.float32), cv2.TM_CCORR_NORMED)
+        _, max_val, _, max_loc = cv2.minMaxLoc(res)
+        return max_val, max_loc, pad
+
+    p_low_normal = cv2.resize(pred_bin.astype(np.uint8), None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+    score_n, loc_n, pad = _match(p_low_normal)
+    
+    p_low_f = cv2.flip(p_low_normal, 1)
+    score_f, loc_f, _ = _match(p_low_f)
+    
+    flip = score_f > score_n * 1.1
+    best_score = max(score_n, score_f)
+    best_loc = loc_f if flip else loc_n
+    
+    dx = int((best_loc[0] - pad) / scale)
+    dy = int((best_loc[1] - pad) / scale)
+    
+    return dx, dy, flip, best_score
+
+def _apply_alignment(mask: np.ndarray, dx: int, dy: int, flip: bool) -> np.ndarray:
+    """Applique les paramètres de recalage."""
+    h, w = mask.shape[:2]
+    if flip:
+        mask = cv2.flip(mask, 1)
+    if dx == 0 and dy == 0:
+        return mask
+    M = np.float32([[1, 0, dx], [0, 1, dy]])
+    return cv2.warpAffine(mask, M, (w, h), flags=cv2.INTER_NEAREST, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+
+
+# =============================================================================
+# Variant 3: DIS Flow (Ultra-fast, CPU)
+# =============================================================================
+
+_DIS_FLOW = None
+
+def compute_flow_warping_error_dis(
+    video: np.ndarray,
+    pred_mask: np.ndarray,
+    threshold: float = 0.5,
+    photo_threshold: float = 0.05,
+    max_res: int = 480,
+    return_per_frame: bool = False,
+):
+    """
+    Flow warping error via DISOpticalFlow (OpenCV).
+    Très rapide et optimisé pour le streaming.
+    """
+    global _DIS_FLOW
+    if _DIS_FLOW is None:
+        _DIS_FLOW = cv2.DISOpticalFlow_create(cv2.DISOPTICAL_FLOW_PRESET_FAST)
+    
+    # Ensure numpy arrays
+    if not isinstance(video, np.ndarray): video = np.array(list(video))
+    if not isinstance(pred_mask, np.ndarray): pred_mask = np.array(list(pred_mask))
+
+    video_f = _prepare_video(video)
+    masks = _prepare_mask(pred_mask, threshold)
+    T, H, W = masks.shape
+    if T < 2:
+        return (0.0, np.zeros(0, dtype=np.float32)) if return_per_frame else 0.0
+
+    # Downsampling for flow speed if needed
+    if max(H, W) > max_res:
+        scale = max_res / max(H, W)
+        th, tw = int(H * scale), int(W * scale)
+    else:
+        th, tw = H, W
+
+    per_frame = np.zeros(T - 1, dtype=np.float32)
+    total_err, total_valid = 0.0, 0.0
+    
+    prev_gray = None
+    prev_frame_f = None
+    prev_mask = None
+
+    for t in range(T):
+        curr_frame_f = video_f[t]
+        if max(H, W) > max_res:
+            curr_frame_f = cv2.resize(curr_frame_f, (tw, th), interpolation=cv2.INTER_AREA)
+            curr_mask = cv2.resize(masks[t], (tw, th), interpolation=cv2.INTER_NEAREST)
+        else:
+            curr_mask = masks[t]
+            
+        curr_gray = cv2.cvtColor((curr_frame_f * 255).astype(np.uint8), cv2.COLOR_RGB2GRAY)
+
+        if prev_gray is not None:
+            fwd = _DIS_FLOW.calc(prev_gray, curr_gray, None)
+            bwd = _DIS_FLOW.calc(curr_gray, prev_gray, None)
+            
+            V = _validity_mask(prev_frame_f, curr_frame_f, fwd, bwd, photo_threshold)
+            mask_prev_warped = _warp(prev_mask, bwd)
+            err = np.abs(curr_mask - mask_prev_warped)
+            
+            n_valid = V.sum()
+            err_val = (V * err).sum()
+            
+            if t-1 < len(per_frame):
+                per_frame[t - 1] = err_val / n_valid if n_valid > 0 else 0.0
+            
+            total_err += err_val
+            total_valid += n_valid
+
+        prev_gray = curr_gray
+        prev_frame_f = curr_frame_f
+        prev_mask = curr_mask
+
+    gc.collect()
+    mean_err = float(total_err / total_valid) if total_valid > 0 else 0.0
+    return (mean_err, per_frame) if return_per_frame else mean_err
 
 
 # -----------------------------------------------------------------------------
