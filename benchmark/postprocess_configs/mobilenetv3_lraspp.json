@@ -1,0 +1,47 @@
+{
+  "model_key": "mobilenetv3_lraspp",
+  "methods": [
+    {
+      "name": "gaussian_blur",
+      "enabled": true,
+      "params": {
+        "ksize": 5,
+        "sigma": 1.0
+      }
+    },
+    {
+      "name": "morphological_close",
+      "enabled": false,
+      "params": {
+        "ksize": 7
+      }
+    },
+    {
+      "name": "morphological_open",
+      "enabled": false,
+      "params": {
+        "ksize": 3
+      }
+    },
+    {
+      "name": "guided_filter",
+      "enabled": false,
+      "params": {
+        "radius": 4,
+        "eps": 0.05
+      }
+    },
+    {
+      "name": "largest_components",
+      "enabled": false,
+      "params": {
+        "n": 1
+      }
+    },
+    {
+      "name": "hole_filling",
+      "enabled": false,
+      "params": {}
+    }
+  ]
+}

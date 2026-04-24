@@ -8,6 +8,8 @@ Offre une interface moderne pour :
   - Visualiser les résultats en temps réel.
 """
 
+import io
+import json
 import os
 
 # Désactivation TOTALE des logs MediaPipe/GLog au démarrage
@@ -19,8 +21,10 @@ import queue
 import sys
 import threading
 import time
+import warnings
 import zipfile
 from pathlib import Path
+import logging
 
 import cv2
 import numpy as np
@@ -47,6 +51,14 @@ from benchmark.runner import (
     discover_datasets,
     get_frame_at,
     run_benchmark,
+)
+from benchmark.config import DATASETS, GROUND_TRUTH_DIR, OUTPUT_DIR, TEMP_RESULTS_DIR, VIDEOS_DIR
+from benchmark.postprocess import (
+    METHODS_BY_MODEL,
+    SUPPORTED_MODELS as PP_SUPPORTED_MODELS,
+    load_config as pp_load_config,
+    save_config as pp_save_config,
+    _default_config as pp_default_config,
 )
 
 # ── Page config ──────────────────────────────────────────────────────────────
@@ -394,13 +406,12 @@ curr_videos_dir = curr_dataset_root / "videos"
 curr_gt_dir = curr_dataset_root / "ground_truth"
 
 # ── Tabs ─────────────────────────────────────────────────────────────────────
-tab1, tab2, tab3 = st.tabs(
-    [
-        "🚀 Benchmark complet",
-        "📊 Métriques sur outputs",
-        "🖼️ Comparateur visuel",
-    ]
-)
+tab1, tab2, tab3, tab4 = st.tabs([
+    "🚀 Benchmark complet",
+    "📊 Métriques sur outputs",
+    "🖼️ Comparateur visuel",
+    "⚙️ Post-processing",
+])
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -523,6 +534,22 @@ with tab1:
 - **Dossier sortie** : `{OUTPUT_DIR}`
         """)
 
+        # Indicateur post-processing actif
+        _PP_DISPLAY = {
+            "mediapipe_portrait": "MediaPipe Portrait",
+            "mobilenetv3_lraspp": "MobileNetV3 + LRASPP",
+            "rvm": "RVM (MobileNetV3)",
+        }
+        active_pp = []
+        for _k in selected_models:
+            if _k in PP_SUPPORTED_MODELS:
+                _cfg = pp_load_config(_k)
+                _active = [m["name"] for m in _cfg.get("methods", []) if m.get("enabled")]
+                if _active:
+                    active_pp.append(f"**{_PP_DISPLAY.get(_k, _k)}** : {', '.join(_active)}")
+        if active_pp:
+            st.success("✅ Post-processing actif :\n" + "\n".join(f"- {x}" for x in active_pp))
+
         launch_btn = st.button("🚀 LANCER LE BENCHMARK", type="primary", key="t1_launch")
 
     with st.expander("📖 Guide des métriques", expanded=False):
@@ -549,7 +576,15 @@ with tab1:
             _save_masks = save_masks
             _save_video = save_video
             _save_segmented = save_segmented
-            _analyze = analyze_thresholds
+            _analyze       = analyze_thresholds
+
+            # Charger les configs post-processing pour les modèles supportés sélectionnés
+            _postprocess_configs = {}
+            for _k in selected_models:
+                if _k in PP_SUPPORTED_MODELS:
+                    _cfg = pp_load_config(_k)
+                    if any(m.get("enabled") for m in _cfg.get("methods", [])):
+                        _postprocess_configs[_k] = _cfg
 
             def _bg_benchmark():
                 def _on_result(entry: dict):
@@ -569,6 +604,7 @@ with tab1:
                         save_segmented=_save_segmented,
                         on_result=_on_result,
                         analyze_thresholds=_analyze,
+                        postprocess_configs=_postprocess_configs or None,
                     )
                 finally:
                     bg_queue.put(("done", time.time() - t_start))
@@ -632,11 +668,13 @@ with tab2:
             key="t2_models",
         )
 
-        count_pairs = sum(len(list((masks_root / d).glob("*_mask.mp4"))) for d in selected_dirs)
-        st.info(
-            f"**{count_pairs}** paires (modèle × vidéo) détectées | "
-            f"Seuil binarisation : **{threshold}**"
+        count_pairs = sum(
+            len(list((masks_root / d).glob("*_mask.mp4"))) +
+            len(list((masks_root / d).glob("run_*/*_mask.mp4")))
+            for d in selected_dirs
         )
+        st.info(f"**{count_pairs}** paires (modèle × vidéo) détectées | "
+                f"Seuil binarisation : **{threshold}**")
 
         with st.expander("📖 Guide des métriques", expanded=False):
             st.markdown(METRIC_GUIDE)
@@ -702,177 +740,282 @@ with tab3:
         "et la **vérité terrain** sans relancer l'inférence."
     )
 
-    # Build index of available (model, video_stem) pairs
-    # Accepts both *_mask.mp4 (save_video=True) and *_segmented.mp4 (save_segmented=True)
+    # ── Mode photo / vidéo ────────────────────────────────────────────────────
+    view_mode = st.radio(
+        "Mode d'affichage",
+        options=["📷 Mode photo", "🎬 Mode vidéo"],
+        horizontal=True,
+        key="t3_view_mode",
+    )
+
+    # ── Build index of available (model_key, video_stem) pairs ────────────────
+    # model_key format :
+    #   "MediaPipe_Portrait"          → flat (old structure)
+    #   "MediaPipe_Portrait/run_001"  → numéroté (new structure for supported models)
     masks_root3 = OUTPUT_DIR / "masks"
-    pairs_index: dict = {}  # model_dir_name → list[video_stem]
+    # pairs_index: model_key → {"stems": [str], "base": Path, "model_dir": str}
+    pairs_index: dict = {}
+
+    def _stems_from_dir(base_dir: Path, model_dir_name: str):
+        stems = sorted(
+            f.stem.replace(f"_{model_dir_name}_mask", "")
+            for f in base_dir.glob("*_mask.mp4")
+        )
+        if not stems:
+            stems = sorted(
+                f.stem.replace(f"_{model_dir_name}_segmented", "")
+                for f in base_dir.glob("*_segmented.mp4")
+            )
+        return stems
+
     if masks_root3.is_dir():
         for md in sorted(masks_root3.iterdir()):
             if not md.is_dir():
                 continue
-            mask_stems = sorted(
-                f.stem.replace(f"_{md.name}_mask", "") for f in md.glob("*_mask.mp4")
-            )
-            if mask_stems:
-                pairs_index[md.name] = mask_stems
-                continue
-            # Fallback: derive stems from segmented videos
-            seg_stems = sorted(
-                f.stem.replace(f"_{md.name}_segmented", "") for f in md.glob("*_segmented.mp4")
-            )
-            if seg_stems:
-                pairs_index[md.name] = seg_stems
+            # Check for run_* subdirs (supported models)
+            run_dirs = sorted(d for d in md.iterdir() if d.is_dir() and d.name.startswith("run_"))
+            if run_dirs:
+                for rd in run_dirs:
+                    stems = _stems_from_dir(rd, md.name)
+                    if stems:
+                        key = f"{md.name}/{rd.name}"
+                        pairs_index[key] = {"stems": stems, "base": rd, "model_dir": md.name}
+            else:
+                # Flat structure (non-supported or old benchmark)
+                stems = _stems_from_dir(md, md.name)
+                if stems:
+                    pairs_index[md.name] = {"stems": stems, "base": md, "model_dir": md.name}
 
     if not pairs_index:
         st.warning("Aucun masque trouvé. Lancez d'abord un benchmark.")
     else:
         col_sel1, col_sel2 = st.columns(2)
         with col_sel1:
-            chosen_model = st.selectbox(
-                "Modèle",
+            chosen_model_key = st.selectbox(
+                "Modèle / Run",
                 options=list(pairs_index.keys()),
                 key="t3_model",
             )
         with col_sel2:
             chosen_video = st.selectbox(
                 "Vidéo",
-                options=pairs_index.get(chosen_model, []),
+                options=pairs_index.get(chosen_model_key, {}).get("stems", []),
                 key="t3_video",
             )
 
-        if chosen_model and chosen_video:
-            src_path = curr_videos_dir / f"{chosen_video}.mp4"
-            gt_path = curr_gt_dir / f"{chosen_video}.mp4"
-            mask_path = masks_root3 / chosen_model / f"{chosen_video}_{chosen_model}_mask.mp4"
-            seg_path = masks_root3 / chosen_model / f"{chosen_video}_{chosen_model}_segmented.mp4"
+        if chosen_model_key and chosen_video:
+            _t3_entry    = pairs_index[chosen_model_key]
+            _t3_base     = _t3_entry["base"]
+            _t3_mdir     = _t3_entry["model_dir"]
 
-            # Reference video for frame count
-            ref_path = (
-                mask_path if mask_path.exists() else (seg_path if seg_path.exists() else src_path)
-            )
-            n_frames_vis = 1
-            if ref_path.exists():
-                n_frames_vis, _fps, _res = _get_video_info(ref_path)
+            src_path  = curr_videos_dir / f"{chosen_video}.mp4"
+            gt_path   = curr_gt_dir / f"{chosen_video}.mp4"
+            mask_path = _t3_base / f"{chosen_video}_{_t3_mdir}_mask.mp4"
+            seg_path  = _t3_base / f"{chosen_video}_{_t3_mdir}_segmented.mp4"
+            dbg_inter = _t3_base / f"{chosen_video}_DEBUG_intersection.mp4"
+            # DEBUG union video is saved as {dest_base.name}_DEBUG_union.mp4 in the run dir
+            # dest_base is run_dir / video_path.stem, so DEBUG files are in run_dir
+            dbg_union = _t3_base / f"{chosen_video}_DEBUG_union.mp4"
 
-            frame_idx = st.slider(
-                "Numéro de frame",
-                min_value=0,
-                max_value=max(0, n_frames_vis - 1),
-                value=0,
-                key="t3_frame",
-            )
+            # Show postprocess_config.json if available in this run directory
+            _pp_json_path = _t3_base / "postprocess_config.json"
+            if _pp_json_path.exists():
+                with st.expander("🔧 Config post-processing de ce run", expanded=False):
+                    try:
+                        st.json(json.loads(_pp_json_path.read_text()))
+                    except Exception:
+                        st.warning("Config illisible.")
 
-            # Load source and GT
-            img_src = get_frame_at(src_path, frame_idx) if src_path.exists() else None
-            img_gt_raw = get_frame_at(gt_path, frame_idx) if gt_path.exists() else None
-
-            # Load predicted mask: prefer *_mask.mp4, fallback to *_segmented.mp4
-            img_mask = None
-            mask_source = ""
-            if mask_path.exists():
-                img_mask = get_frame_at(mask_path, frame_idx)
-                mask_source = "mask"
-            elif seg_path.exists():
-                seg_frame = get_frame_at(seg_path, frame_idx)
-                if seg_frame is not None:
-                    # Derive mask: non-black pixels → foreground
-                    seg_rgb = cv2.cvtColor(seg_frame, cv2.COLOR_BGR2RGB)
-                    derived = np.any(seg_rgb > 10, axis=2).astype(np.uint8) * 255
-                    img_mask = cv2.cvtColor(derived, cv2.COLOR_GRAY2BGR)
-                    mask_source = "segmented"
-
-            # Convert GT to mask
-            img_gt_mask = None
-            if img_gt_raw is not None:
-                if _is_chroma_key(img_gt_raw):
-                    gt_bin = _chroma_key_to_mask(img_gt_raw)
-                    img_gt_mask = (gt_bin * 255).astype(np.uint8)
-                else:
-                    img_gt_mask = cv2.cvtColor(img_gt_raw, cv2.COLOR_BGR2GRAY).astype(np.uint8)
-
-            # ── Row 1: 3 columns ─────────────────────────────────────────────
-            c_src, c_pred, c_gt = st.columns(3)
-
-            with c_src:
-                st.markdown("**Frame source**")
-                if img_src is not None:
-                    st.image(cv2.cvtColor(img_src, cv2.COLOR_BGR2RGB), width="stretch")
-                else:
-                    st.warning("Vidéo source introuvable.")
-
-            with c_pred:
-                label = "**Masque prédit**" + (
-                    " *(dérivé du segmenté)*" if mask_source == "segmented" else ""
-                )
-                st.markdown(label)
-                if img_mask is not None:
-                    gray_pred = cv2.cvtColor(img_mask, cv2.COLOR_BGR2GRAY)
-                    st.image(gray_pred, width="stretch", clamp=True)
-                else:
-                    st.warning("Masque prédit introuvable.")
-
-            with c_gt:
-                st.markdown("**GT binarisé**")
-                if img_gt_mask is not None:
-                    st.image(img_gt_mask, width="stretch", clamp=True)
-                else:
-                    st.warning("GT introuvable.")
-
-            # ── Row 2: TP/FP/FN overlay ──────────────────────────────────────
-            if img_src is not None and img_mask is not None and img_gt_mask is not None:
+            # ══════════════════════════════════════════════════════════════════
+            #  MODE VIDÉO
+            # ══════════════════════════════════════════════════════════════════
+            if view_mode == "🎬 Mode vidéo":
                 st.markdown("---")
+                st.subheader("🎬 Lecture vidéo")
 
-                thresh_vis = float(st.session_state.get("t2_threshold", 0.5))
+                c_v1, c_v2, c_v3 = st.columns(3)
+                with c_v1:
+                    st.markdown("**Vidéo source**")
+                    if src_path.exists():
+                        st.video(open(src_path, "rb"))
+                    else:
+                        st.warning("Vidéo source introuvable.")
 
-                # Resize pred mask to source frame size if needed
-                h_src, w_src = img_src.shape[:2]
-                gray_pred_ov = cv2.cvtColor(img_mask, cv2.COLOR_BGR2GRAY)
-                if gray_pred_ov.shape != (h_src, w_src):
-                    gray_pred_ov = cv2.resize(
-                        gray_pred_ov, (w_src, h_src), interpolation=cv2.INTER_NEAREST
-                    )
+                with c_v2:
+                    st.markdown("**Masque prédit**")
+                    if mask_path.exists():
+                        st.video(open(mask_path, "rb"))
+                    else:
+                        st.warning("Masque introuvable.")
 
-                gt_ov = img_gt_mask
-                if gt_ov.shape != (h_src, w_src):
-                    gt_ov = cv2.resize(
-                        gt_ov, (w_src, h_src), interpolation=cv2.INTER_NEAREST
-                    ).astype(np.uint8)
+                with c_v3:
+                    st.markdown("**GT (vidéo)**")
+                    if gt_path.exists():
+                        st.video(open(gt_path, "rb"))
+                    else:
+                        st.info("GT vidéo non disponible.")
 
-                bin_pred = gray_pred_ov > int(thresh_vis * 255)
-                bin_gt = gt_ov > int(thresh_vis * 255)
+                st.markdown("---")
+                c_v4, c_v5, c_v6 = st.columns(3)
+                with c_v4:
+                    st.markdown("**Sujet détouré**")
+                    if seg_path.exists():
+                        st.video(open(seg_path, "rb"))
+                    else:
+                        st.info("Vidéo détourée non disponible.")
 
-                tp = bin_pred & bin_gt  # green  (0, 200, 0)
-                fp = bin_pred & ~bin_gt  # red    (220, 50, 50)
-                fn = ~bin_pred & bin_gt  # blue   (50, 50, 220)
+                with c_v5:
+                    st.markdown("**Debug — Intersection (TP)**")
+                    if dbg_inter.exists():
+                        st.video(open(dbg_inter, "rb"))
+                    else:
+                        st.info("Non disponible — lancez un benchmark avec GT.")
 
-                alpha = 0.45
-                overlay_f = cv2.cvtColor(img_src, cv2.COLOR_BGR2RGB).astype(np.float32)
-                overlay_f[tp] = (
-                    overlay_f[tp] * (1 - alpha) + np.array([0, 200, 0], np.float32) * alpha
+                with c_v6:
+                    st.markdown("**Debug — Union (erreurs)**")
+                    if dbg_union.exists():
+                        st.video(open(dbg_union, "rb"))
+                    else:
+                        st.info("Non disponible — lancez un benchmark avec GT.")
+
+                # Métriques globales depuis le CSV
+                csv_path = OUTPUT_DIR / "benchmark_results.csv"
+                if csv_path.exists():
+                    df_csv = pd.read_csv(csv_path)
+                    # model name from dir name
+                    _model_display = _t3_mdir.replace("_", " ")
+                    _video_file = f"{chosen_video}.mp4"
+                    row = df_csv[
+                        (df_csv.get("model", pd.Series(dtype=str)) == _model_display) &
+                        (df_csv.get("video", pd.Series(dtype=str)) == _video_file)
+                    ] if "model" in df_csv.columns else pd.DataFrame()
+                    if not row.empty:
+                        st.markdown("---")
+                        st.subheader("📊 Métriques globales (depuis CSV)")
+                        mcols = st.columns(4)
+                        r = row.iloc[-1]
+                        for col_w, key, label in zip(
+                            mcols,
+                            ["iou_mean", "boundary_f_mean", "flow_warping_error", "latency_p95_ms"],
+                            ["IoU moyen", "Boundary F moyen", "Flow Warping Error", "Latence p95 (ms)"],
+                        ):
+                            val = r.get(key)
+                            col_w.metric(label, f"{float(val):.4f}" if pd.notna(val) else "N/A")
+
+            # ══════════════════════════════════════════════════════════════════
+            #  MODE PHOTO (comportement original)
+            # ══════════════════════════════════════════════════════════════════
+            else:
+                # Reference video for frame count
+                ref_path = mask_path if mask_path.exists() else (seg_path if seg_path.exists() else src_path)
+                n_frames_vis = 1
+                if ref_path.exists():
+                    n_frames_vis, _, _ = _get_video_info(ref_path)
+
+                frame_idx = st.slider(
+                    "Numéro de frame",
+                    min_value=0,
+                    max_value=max(0, n_frames_vis - 1),
+                    value=0,
+                    key="t3_frame",
                 )
-                overlay_f[fp] = (
-                    overlay_f[fp] * (1 - alpha) + np.array([220, 50, 50], np.float32) * alpha
-                )
-                overlay_f[fn] = (
-                    overlay_f[fn] * (1 - alpha) + np.array([50, 50, 220], np.float32) * alpha
-                )
-                overlay_img = overlay_f.clip(0, 255).astype(np.uint8)
 
-                # Per-frame metrics
-                from benchmark.metrics import compute_boundary_f_measure, compute_iou
+                # Load source and GT
+                img_src    = get_frame_at(src_path, frame_idx) if src_path.exists() else None
+                img_gt_raw = get_frame_at(gt_path,  frame_idx) if gt_path.exists()  else None
 
-                pred_f32 = gray_pred_ov.astype(np.float32) / 255.0
-                gt_f32 = gt_ov.astype(np.float32) / 255.0
-                frame_iou = compute_iou([pred_f32], [gt_f32], threshold=thresh_vis)
-                frame_bf = compute_boundary_f_measure(pred_f32, gt_f32, threshold=thresh_vis)
+                # Load predicted mask: prefer *_mask.mp4, fallback to *_segmented.mp4
+                img_mask = None
+                mask_source = ""
+                if mask_path.exists():
+                    img_mask = get_frame_at(mask_path, frame_idx)
+                    mask_source = "mask"
+                elif seg_path.exists():
+                    seg_frame = get_frame_at(seg_path, frame_idx)
+                    if seg_frame is not None:
+                        seg_rgb = cv2.cvtColor(seg_frame, cv2.COLOR_BGR2RGB)
+                        derived = (np.any(seg_rgb > 10, axis=2).astype(np.uint8) * 255)
+                        img_mask = cv2.cvtColor(derived, cv2.COLOR_GRAY2BGR)
+                        mask_source = "segmented"
 
-                col_ov, col_leg = st.columns([3, 1])
-                with col_ov:
-                    st.markdown("**Overlay TP / FP / FN**")
-                    st.image(overlay_img, width="stretch")
-                with col_leg:
-                    st.markdown("**Légende**")
-                    st.markdown("""
+                # Convert GT to mask
+                img_gt_mask = None
+                if img_gt_raw is not None:
+                    if _is_chroma_key(img_gt_raw):
+                        gt_bin = _chroma_key_to_mask(img_gt_raw)
+                        img_gt_mask = (gt_bin * 255).astype(np.uint8)
+                    else:
+                        img_gt_mask = cv2.cvtColor(img_gt_raw, cv2.COLOR_BGR2GRAY)
+
+                # ── Row 1: 3 columns ──────────────────────────────────────────
+                c_src, c_pred, c_gt = st.columns(3)
+
+                with c_src:
+                    st.markdown("**Frame source**")
+                    if img_src is not None:
+                        st.image(cv2.cvtColor(img_src, cv2.COLOR_BGR2RGB), width='stretch')
+                    else:
+                        st.warning("Vidéo source introuvable.")
+
+                with c_pred:
+                    label = "**Masque prédit**" + (" *(dérivé du segmenté)*" if mask_source == "segmented" else "")
+                    st.markdown(label)
+                    if img_mask is not None:
+                        gray_pred = cv2.cvtColor(img_mask, cv2.COLOR_BGR2GRAY)
+                        st.image(gray_pred, width='stretch', clamp=True)
+                    else:
+                        st.warning("Masque prédit introuvable.")
+
+                with c_gt:
+                    st.markdown("**GT binarisé**")
+                    if img_gt_mask is not None:
+                        st.image(img_gt_mask, width='stretch', clamp=True)
+                    else:
+                        st.warning("GT introuvable.")
+
+                # ── Row 2: TP/FP/FN overlay ──────────────────────────────────
+                if img_src is not None and img_mask is not None and img_gt_mask is not None:
+                    st.markdown("---")
+
+                    thresh_vis = float(st.session_state.get("t2_threshold", 0.5))
+
+                    h_src, w_src = img_src.shape[:2]
+                    gray_pred_ov = cv2.cvtColor(img_mask, cv2.COLOR_BGR2GRAY)
+                    if gray_pred_ov.shape != (h_src, w_src):
+                        gray_pred_ov = cv2.resize(gray_pred_ov, (w_src, h_src),
+                                                  interpolation=cv2.INTER_NEAREST)
+
+                    gt_ov = img_gt_mask
+                    if gt_ov.shape != (h_src, w_src):
+                        gt_ov = cv2.resize(gt_ov, (w_src, h_src), interpolation=cv2.INTER_NEAREST)
+
+                    bin_pred = gray_pred_ov > int(thresh_vis * 255)
+                    bin_gt   = gt_ov > int(thresh_vis * 255)
+
+                    tp = bin_pred & bin_gt
+                    fp = bin_pred & ~bin_gt
+                    fn = ~bin_pred & bin_gt
+
+                    alpha = 0.45
+                    overlay_f = cv2.cvtColor(img_src, cv2.COLOR_BGR2RGB).astype(np.float32)
+                    overlay_f[tp] = overlay_f[tp] * (1 - alpha) + np.array([0, 200, 0],   np.float32) * alpha
+                    overlay_f[fp] = overlay_f[fp] * (1 - alpha) + np.array([220, 50, 50], np.float32) * alpha
+                    overlay_f[fn] = overlay_f[fn] * (1 - alpha) + np.array([50, 50, 220], np.float32) * alpha
+                    overlay_img = overlay_f.clip(0, 255).astype(np.uint8)
+
+                    from benchmark.metrics import compute_iou, compute_boundary_f_measure
+                    pred_f32 = gray_pred_ov.astype(np.float32) / 255.0
+                    gt_f32   = gt_ov.astype(np.float32) / 255.0
+                    frame_iou = compute_iou([pred_f32], [gt_f32], threshold=thresh_vis)
+                    frame_bf  = compute_boundary_f_measure(pred_f32, gt_f32, threshold=thresh_vis)
+
+                    col_ov, col_leg = st.columns([3, 1])
+                    with col_ov:
+                        st.markdown("**Overlay TP / FP / FN**")
+                        st.image(overlay_img, width='stretch')
+                    with col_leg:
+                        st.markdown("**Légende**")
+                        st.markdown("""
 - 🟢 **Vert** — Vrai positif (TP)
   *(pred = personne, GT = personne)*
 - 🔴 **Rouge** — Faux positif (FP)
@@ -881,10 +1024,137 @@ with tab3:
   *(pred = fond, GT = personne)*
 - *(fond inchangé = vrai négatif)*
 """)
-                    st.markdown("**Métriques de cette frame**")
-                    st.metric("IoU", f"{frame_iou:.3f}")
-                    st.metric("Boundary F", f"{frame_bf:.3f}")
-                    n_tp = int(tp.sum())
-                    n_fp = int(fp.sum())
-                    n_fn = int(fn.sum())
-                    st.caption(f"TP={n_tp:,}  FP={n_fp:,}  FN={n_fn:,} px")
+                        st.markdown("**Métriques de cette frame**")
+                        st.metric("IoU", f"{frame_iou:.3f}")
+                        st.metric("Boundary F", f"{frame_bf:.3f}")
+                        n_tp = int(tp.sum())
+                        n_fp = int(fp.sum())
+                        n_fn = int(fn.sum())
+                        st.caption(f"TP={n_tp:,}  FP={n_fp:,}  FN={n_fn:,} px")
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  TAB 4 — Post-processing configuration
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+with tab4:
+    st.title("⚙️ Configuration Post-processing")
+    st.markdown(
+        "Configurez les méthodes de post-processing pour les 3 modèles les plus performants. "
+        "La configuration sera automatiquement appliquée lors du prochain benchmark."
+    )
+
+    # Noms d'affichage des modèles supportés
+    _PP_MODEL_LABELS = {
+        "mediapipe_portrait": "MediaPipe Portrait",
+        "mobilenetv3_lraspp": "MobileNetV3 + LRASPP",
+        "rvm": "RVM (MobileNetV3)",
+    }
+
+    chosen_pp_model = st.selectbox(
+        "Modèle à configurer",
+        options=list(_PP_MODEL_LABELS.keys()),
+        format_func=lambda k: _PP_MODEL_LABELS[k],
+        key="t4_model",
+    )
+
+    st.divider()
+
+    # Charger la config actuelle
+    current_cfg = pp_load_config(chosen_pp_model)
+    methods_def = METHODS_BY_MODEL.get(chosen_pp_model, [])
+
+    # Construire un dict méthode_name → config actuelle pour lookup rapide
+    current_methods_by_name = {m["name"]: m for m in current_cfg.get("methods", [])}
+
+    st.subheader("🔧 Méthodes disponibles")
+    new_methods = []
+
+    for method_def in methods_def:
+        mname = method_def["name"]
+        mlabel = method_def["label"]
+        mdesc = method_def["description"]
+        params_def = method_def["params"]
+
+        # Récupérer l'état actuel
+        cur = current_methods_by_name.get(mname, {})
+        cur_enabled = cur.get("enabled", False)
+        cur_params = cur.get("params", {})
+
+        with st.container(border=True):
+            col_chk, col_desc = st.columns([1, 4])
+            with col_chk:
+                enabled = st.checkbox(
+                    f"**{mlabel}**",
+                    value=cur_enabled,
+                    key=f"t4_{chosen_pp_model}_{mname}_en",
+                )
+            with col_desc:
+                st.caption(mdesc)
+
+            new_params = {}
+            if params_def:
+                param_cols = st.columns(min(len(params_def), 4))
+                for i, (pname, pdef) in enumerate(params_def.items()):
+                    with param_cols[i % len(param_cols)]:
+                        cur_val = cur_params.get(pname, pdef["default"])
+                        if pdef["type"] == "int":
+                            new_params[pname] = st.number_input(
+                                pname,
+                                min_value=int(pdef["min"]),
+                                max_value=int(pdef["max"]),
+                                value=int(cur_val),
+                                step=int(pdef["step"]),
+                                key=f"t4_{chosen_pp_model}_{mname}_{pname}",
+                                disabled=not enabled,
+                            )
+                        else:
+                            new_params[pname] = st.number_input(
+                                pname,
+                                min_value=float(pdef["min"]),
+                                max_value=float(pdef["max"]),
+                                value=float(cur_val),
+                                step=float(pdef["step"]),
+                                format="%.2f",
+                                key=f"t4_{chosen_pp_model}_{mname}_{pname}",
+                                disabled=not enabled,
+                            )
+            else:
+                # Méthode sans paramètres (ex: hole_filling)
+                new_params = {}
+
+            new_methods.append({
+                "name": mname,
+                "enabled": enabled,
+                "params": new_params,
+            })
+
+    st.divider()
+    col_save, col_reset, _ = st.columns([1, 1, 3])
+
+    with col_save:
+        if st.button("💾 Sauvegarder", type="primary", key="t4_save"):
+            new_cfg = {
+                "model_key": chosen_pp_model,
+                "methods": new_methods,
+            }
+            pp_save_config(chosen_pp_model, new_cfg)
+            st.success(f"Config sauvegardée pour {_PP_MODEL_LABELS[chosen_pp_model]} !")
+            st.rerun()
+
+    with col_reset:
+        if st.button("🔄 Réinitialiser", key="t4_reset"):
+            default_cfg = pp_default_config(chosen_pp_model)
+            pp_save_config(chosen_pp_model, default_cfg)
+            st.info("Config réinitialisée (toutes les méthodes désactivées).")
+            st.rerun()
+
+    st.divider()
+    st.subheader("📄 Config actuelle (JSON)")
+    # Recharger depuis le fichier pour afficher l'état sauvegardé
+    saved_cfg = pp_load_config(chosen_pp_model)
+    active_count = sum(1 for m in saved_cfg.get("methods", []) if m.get("enabled"))
+    if active_count > 0:
+        st.success(f"{active_count} méthode(s) active(s) pour {_PP_MODEL_LABELS[chosen_pp_model]}")
+    else:
+        st.info("Aucune méthode active — post-processing désactivé pour ce modèle.")
+    st.json(saved_cfg)
