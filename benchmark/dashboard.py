@@ -234,6 +234,70 @@ def _build_zip_bytes(output_dir: Path) -> bytes:
     return buf.read()
 
 
+# ── Auto-refresh fragment for tab1 background benchmark ──────────────────────
+@st.fragment(run_every=2)
+def _t1_live_panel(total_combos: int):
+    """Drains the benchmark result queue every 2 s and refreshes the display."""
+    q = st.session_state.get("t1_queue")
+    if q is None:
+        return
+
+    while True:
+        try:
+            msg_type, data = q.get_nowait()
+            if msg_type == "result":
+                st.session_state.setdefault("t1_results", []).append(data)
+            elif msg_type == "done":
+                st.session_state["t1_running"] = False
+                st.session_state["t1_elapsed"] = data
+        except Exception:
+            break
+
+    results = st.session_state.get("t1_results", [])
+    running  = st.session_state.get("t1_running", False)
+
+    if not results and not running:
+        return
+
+    done_count = len(results)
+    if total_combos > 0:
+        st.progress(done_count / total_combos,
+                    text=f"{done_count}/{total_combos} combinaisons traitées")
+
+    if results:
+        df_live = pd.DataFrame(results)
+        st.subheader(f"📊 Résultats en cours… ({done_count} terminé(s))")
+        st.dataframe(_styled_df(df_live), width='stretch')
+
+    if not running and results:
+        elapsed = st.session_state.get("t1_elapsed", 0)
+        st.success(f"✅ Benchmark terminé en {elapsed:.1f}s !")
+        df_done = pd.DataFrame(results)
+
+        st.subheader("📈 Moyennes par modèle")
+        avg = df_done.groupby("model").mean(numeric_only=True).reset_index()
+        if not avg.empty:
+            st.table(avg)
+            if "iou_mean" in avg.columns:
+                st.bar_chart(avg, x="model", y="iou_mean")
+
+        st.subheader("⚡ Qualité vs Latence")
+        _scatter_chart(df_done)
+
+        if any(r.get("threshold_analysis") for r in results):
+            st.subheader("🔬 Sensibilité au seuil de binarisation")
+            st.markdown(
+                "Évolution de l'IoU et du Boundary F en fonction du seuil — "
+                "utile pour identifier le seuil optimal par modèle."
+            )
+            _threshold_sensitivity_chart(results)
+
+        csv_data = df_done.to_csv(index=False).encode("utf-8")
+        st.download_button("📥 Télécharger CSV", data=csv_data,
+                           file_name="benchmark_results.csv", mime="text/csv",
+                           key="t1_dl_csv")
+
+
 # ── Auto-refresh fragment for tab2 background computation ────────────────────
 @st.fragment(run_every=2)
 def _t2_live_panel(count_pairs: int):
@@ -440,69 +504,55 @@ with tab1:
         if not selected_models:
             st.error("Sélectionnez au moins un modèle.")
         else:
-            results_so_far: list = []
-            results_placeholder = st.empty()
+            bg_queue: queue.Queue = queue.Queue()
+            st.session_state["t1_queue"]   = bg_queue
+            st.session_state["t1_results"] = []
+            st.session_state["t1_running"] = True
+            st.session_state["t1_elapsed"] = 0
 
-            def _on_result_t1(entry: dict):
-                results_so_far.append(entry)
-                df_live = pd.DataFrame(results_so_far)
-                with results_placeholder.container():
-                    st.subheader(f"📊 Résultats en cours… ({len(results_so_far)} terminé(s))")
-                    st.dataframe(_styled_df(df_live), width='stretch')
+            # Capture all config before the thread starts (avoid closure issues)
+            _models        = [MODEL_REGISTRY[k]() for k in selected_models]
+            _videos_dir    = curr_videos_dir
+            _gt_dir        = curr_gt_dir
+            _num_videos    = num_videos
+            _shuffle       = use_shuffle
+            _v_indices     = video_indices
+            _save_masks    = save_masks
+            _save_video    = save_video
+            _save_segmented = save_segmented
+            _analyze       = analyze_thresholds
 
-            models = [MODEL_REGISTRY[k]() for k in selected_models]
+            def _bg_benchmark():
+                def _on_result(entry: dict):
+                    bg_queue.put(("result", entry))
 
-            with st.status("🛠️ Benchmark en cours…", expanded=True) as status_box:
-                st.write("Initialisation des modèles…")
                 t_start = time.time()
-                results = run_benchmark(
-                    models=models,
-                    videos_dir=curr_videos_dir,
-                    gt_dir=curr_gt_dir,
-                    num_videos=num_videos,
-                    random_selection=use_shuffle,
-                    video_indices=video_indices,
-                    save_masks=save_masks,
-                    save_video=save_video,
-                    save_segmented=save_segmented,
-                    on_result=_on_result_t1,
-                    analyze_thresholds=analyze_thresholds,
-                )
-                elapsed = time.time() - t_start
-                status_box.update(label=f"✅ Terminé en {elapsed:.1f}s", state="complete")
-
-            st.success("Benchmark terminé !")
-
-            if results:
-                df = pd.DataFrame(results)
-                st.subheader("📊 Résultats finaux")
-                st.dataframe(_styled_df(df), width='stretch')
-
-                csv_data = df.to_csv(index=False).encode("utf-8")
-                st.download_button("📥 Télécharger CSV", data=csv_data,
-                                   file_name="benchmark_results.csv", mime="text/csv")
-
-                st.subheader("📈 Moyennes par modèle")
-                avg = df.groupby("model").mean(numeric_only=True).reset_index()
-                if not avg.empty:
-                    st.table(avg)
-                    if "iou_mean" in avg.columns:
-                        st.bar_chart(avg, x="model", y="iou_mean")
-
-                st.subheader("⚡ Qualité vs Latence")
-                _scatter_chart(df)
-
-                if analyze_thresholds and any(r.get("threshold_analysis") for r in results):
-                    st.subheader("🔬 Sensibilité au seuil de binarisation")
-                    st.markdown(
-                        "Évolution de l'IoU et du Boundary F en fonction du seuil de "
-                        "binarisation — utile pour identifier le seuil optimal par modèle."
+                try:
+                    run_benchmark(
+                        models=_models,
+                        videos_dir=_videos_dir,
+                        gt_dir=_gt_dir,
+                        num_videos=_num_videos,
+                        random_selection=_shuffle,
+                        video_indices=_v_indices,
+                        save_masks=_save_masks,
+                        save_video=_save_video,
+                        save_segmented=_save_segmented,
+                        on_result=_on_result,
+                        analyze_thresholds=_analyze,
                     )
-                    _threshold_sensitivity_chart(results)
-            else:
-                st.warning("Aucun résultat. Vérifiez le dataset.")
+                finally:
+                    bg_queue.put(("done", time.time() - t_start))
 
-    else:
+            threading.Thread(target=_bg_benchmark, daemon=True).start()
+            st.rerun()
+
+    # Live panel — shows progress even when tab is not active
+    n_seq = num_videos if num_videos > 0 else total_videos
+    total_combos = len(selected_models) * n_seq
+    if st.session_state.get("t1_running") or st.session_state.get("t1_results"):
+        _t1_live_panel(total_combos)
+    elif not launch_btn:
         res_path = OUTPUT_DIR / "benchmark_results.csv"
         if res_path.exists():
             st.subheader("Derniers résultats")
