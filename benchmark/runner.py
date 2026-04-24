@@ -42,8 +42,21 @@ from .config import (
 )
 from .metrics import compute_all_metrics
 from .models.base import BaseModelWrapper
+from .postprocess import PostProcessor, SUPPORTED_MODELS as _PP_SUPPORTED_MODELS
 
 logger = logging.getLogger(__name__)
+
+
+def _build_model_key_map() -> Dict[str, str]:
+    """Retourne un dict model.name → registry_key sans charger les poids."""
+    from .models import MODEL_REGISTRY
+    result: Dict[str, str] = {}
+    for key, cls in MODEL_REGISTRY.items():
+        try:
+            result[cls().name] = key
+        except Exception:
+            pass
+    return result
 
 
 
@@ -491,6 +504,7 @@ def run_inference(
     output_dir: Path,
     batch_size: int = 8,
     collect_masks: bool = True,
+    post_processor=None,
 ) -> Dict:
     """
     Exécute l'inférence sur une vidéo en streaming avec prefetching et batching.
@@ -503,6 +517,8 @@ def run_inference(
     input_shape = (3, h, w)
 
     model.reset_state()
+    if post_processor is not None:
+        post_processor.reset()
     logger.info("Inférence %s sur %s (prefetch actif)…", model.name, video_path.name)
 
     # Préparer le prefetcher avec la taille d'entrée du modèle (si fixe)
@@ -535,12 +551,21 @@ def run_inference(
                 frame = cv2.resize(frame, target_size, interpolation=cv2.INTER_NEAREST)
             
             mask = model.predict(frame)
+            # Appliquer le post-processing si configuré (hors mesure de latence)
+            if post_processor is not None and mask is not None:
+                try:
+                    mask_f32 = mask.astype(np.float32)
+                    if mask_f32.max() > 1.0:
+                        mask_f32 = mask_f32 / 255.0
+                    mask = post_processor.apply(mask_f32, frame_bgr=frame)
+                except Exception as _pp_err:
+                    logger.warning("Post-processing échoué frame %d : %s", frame_idx, _pp_err)
             t_end = time.perf_counter()
-            
+
             latency = (t_end - t_start) * 1000.0
             if frame_idx >= WARMUP_FRAMES:
                 latencies.append(latency)
-            
+
             if collect_masks:
                 # SÉCURITÉ ABSOLUE : On vérifie que mask n'est pas None avant TOUTE opération
                 if mask is not None:
@@ -705,6 +730,7 @@ def run_benchmark(
     progress_callback: Optional[Callable[[int, int, str], None]] = None,
     on_result: Optional[Callable[[Dict], None]] = None,
     analyze_thresholds: bool = False,
+    postprocess_configs: Optional[Dict[str, dict]] = None,
 ) -> List[Dict]:
     """
     Exécute le benchmark complet pour tous les modèles sur toutes les vidéos.
@@ -760,11 +786,46 @@ def run_benchmark(
     if progress_callback:
         progress_callback(0, total_combos, "Démarrage du benchmark...")
 
+    # Reverse mapping model.name → registry key (pour post-processing + numérotation)
+    _model_key_map = _build_model_key_map()
+
     for model in models:
 
         logger.info("─" * 72)
         logger.info("Modèle : %s", model.name)
         logger.info("─" * 72)
+
+        model_dir_name = model.name.replace(" ", "_")
+        model_key = _model_key_map.get(model.name)
+
+        # ── Post-processor pour ce modèle ──
+        _pp_config: Optional[Dict] = None
+        _post_processor: Optional[PostProcessor] = None
+        if model_key and postprocess_configs and model_key in postprocess_configs:
+            _pp_config = postprocess_configs[model_key]
+            _post_processor = PostProcessor(_pp_config)
+            if _post_processor.has_active_methods:
+                logger.info("Post-processing actif pour %s : %s", model.name,
+                            [m["name"] for m in _pp_config.get("methods", []) if m.get("enabled")])
+            else:
+                _post_processor = None
+
+        # ── Répertoire de run numéroté (modèles supportés uniquement) ──
+        _run_dir: Optional[Path] = None
+        _use_run_dir = (model_key in _PP_SUPPORTED_MODELS) if model_key else False
+        if _use_run_dir and (save_masks or save_video or save_segmented):
+            _model_output_dir = masks_final_dir / model_dir_name
+            _model_output_dir.mkdir(parents=True, exist_ok=True)
+            _existing_runs = sorted(_model_output_dir.glob("run_*"))
+            _run_n = len(_existing_runs) + 1
+            _run_dir = _model_output_dir / f"run_{_run_n:03d}"
+            _run_dir.mkdir(parents=True, exist_ok=True)
+            # Sauvegarde de la config post-process dans le dossier de run
+            _config_to_save = _pp_config if _pp_config else {"model_key": model_key, "methods": []}
+            (_run_dir / "postprocess_config.json").write_text(
+                json.dumps(_config_to_save, indent=2, ensure_ascii=False), encoding="utf-8"
+            )
+            logger.info("Dossier run créé : %s", _run_dir)
 
         # Charger le modèle
         try:
@@ -803,14 +864,15 @@ def run_benchmark(
                 # ── Étape 1 : Inférence (Streaming + Prefetch) ──
                 # On évite d'écrire sur disque si on ne veut que les métriques
                 masks_output = temp_dir / f"{model.name.replace(' ', '_')}_{video_path.stem}"
-                
+
                 # Si save_masks est False, on ne passe pas de masks_output à run_inference
                 # mais on demande de collecter les masques en RAM pour l'évaluation.
                 inference_result = run_inference(
-                    model, 
-                    video_path, 
+                    model,
+                    video_path,
                     masks_output if save_masks else None,
-                    collect_masks=True
+                    collect_masks=True,
+                    post_processor=_post_processor,
                 )
 
                 result_entry.update({
@@ -864,9 +926,15 @@ def run_benchmark(
 
                 # ── Sauvegarde permanente si demandée ──
                 if save_masks or save_video or save_segmented:
-                    dest_base = masks_final_dir / model.name.replace(" ", "_") / video_path.stem
+                    # Modèles supportés → sous-dossier run numéroté ; sinon comportement classique
+                    if _run_dir is not None:
+                        out_base_dir = _run_dir
+                        dest_base = _run_dir / video_path.stem
+                    else:
+                        out_base_dir = masks_final_dir / model_dir_name
+                        dest_base = out_base_dir / video_path.stem
                     dest_base.mkdir(parents=True, exist_ok=True)
-                    
+
                     # Utiliser les masques en RAM si l'écriture disque a été bypassée
                     m_temp = inference_result.get("masks")
                     if not m_temp or len(m_temp) == 0:
@@ -875,16 +943,16 @@ def run_benchmark(
                     if save_masks:
                         _save_masks(m_temp, dest_base)
                         logger.info("💾 Masques PNG sauvegardés dans : %s", dest_base)
-                        
+
                     if save_video:
-                        video_out_path = dest_base.parent / f"{video_path.stem}_{model.name.replace(' ', '_')}_mask.mp4"
+                        video_out_path = out_base_dir / f"{video_path.stem}_{model_dir_name}_mask.mp4"
                         _save_masks_as_video_fast(m_temp, video_out_path, fps)
                         logger.info("🎬 Vidéo masque sauvegardée : %s", video_out_path)
 
                     if save_segmented:
                         # Lire les frames à nouveau pour le détourage
                         frames_list, _ = _read_video_frames(video_path)
-                        seg_video_path = dest_base.parent / f"{video_path.stem}_{model.name.replace(' ', '_')}_segmented.mp4"
+                        seg_video_path = out_base_dir / f"{video_path.stem}_{model_dir_name}_segmented.mp4"
                         _save_segmented_video(m_temp, frames_list, seg_video_path, fps)
                         logger.info("🎨 Vidéo détourée sauvegardée : %s", seg_video_path)
 
@@ -1035,7 +1103,12 @@ def compute_metrics_on_output(
 
     for model_dir in model_dirs:
         model_name = model_dir.name.replace("_", " ")
+        # Chercher les fichiers masque directement ET dans les sous-dossiers run_*
         mask_files = sorted(model_dir.glob("*_mask.mp4"))
+        for run_subdir in sorted(model_dir.glob("run_*")):
+            if run_subdir.is_dir():
+                mask_files.extend(sorted(run_subdir.glob("*_mask.mp4")))
+        mask_files = sorted(set(mask_files))
         if not mask_files:
             continue
 
