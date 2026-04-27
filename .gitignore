@@ -16,6 +16,12 @@ benchmark/results/
 *.png
 *.csv
 
+# Pipeline data et poids
+pipeline/data/videos/
+pipeline/weights/
+!pipeline/data/videos/.gitkeep
+!pipeline/weights/.gitkeep
+
 # Poids des modèles
 benchmark/weights/*.onnx
 benchmark/weights/*.tflite
@@ -57,3 +63,4 @@ dist/
 # Claude Code
 CLAUDE.md
 .claude/
+claude_pipeline_architecture.md
