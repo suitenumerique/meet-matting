@@ -1,7 +1,0 @@
-numpy>=1.23
-opencv-python>=4.7
-onnx>=1.14
-onnx-tool>=0.9.0
-onnxruntime>=1.16
-torch>=2.0
-torchvision>=0.15

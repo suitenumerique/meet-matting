@@ -9,11 +9,11 @@ Métriques :
 
 import gc
 import logging
-from typing import Iterable, List, Optional, Tuple
+from collections.abc import Iterable
+from concurrent.futures import ThreadPoolExecutor
 
 import cv2
 import numpy as np
-from concurrent.futures import ThreadPoolExecutor
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +27,7 @@ _BF_MAX_RES = 540
 _FWE_MAX_RES = 320
 
 # DIS optical flow — singleton réutilisant les buffers internes d'OpenCV
-_DIS_FLOW = cv2.DISOpticalFlow_create(cv2.DISOPTICAL_FLOW_PRESET_FAST)
+_DIS_FLOW = cv2.DISOpticalFlow_create(cv2.DISOPTICAL_FLOW_PRESET_FAST)  # type: ignore[attr-defined]  # absent des stubs
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -45,12 +45,13 @@ def _to_binary(mask: np.ndarray, threshold: float) -> np.ndarray:
     return m >= threshold
 
 
-def _resize_to_match(arr: np.ndarray, ref_shape: Tuple[int, int]) -> np.ndarray:
+def _resize_to_match(arr: np.ndarray, ref_shape: tuple[int, int]) -> np.ndarray:
     """Redimensionne arr à ref_shape (H,W) si nécessaire (INTER_NEAREST)."""
     if arr.shape[:2] == ref_shape:
         return arr
     return cv2.resize(
-        arr.astype(np.uint8), (ref_shape[1], ref_shape[0]),
+        arr.astype(np.uint8),
+        (ref_shape[1], ref_shape[0]),
         interpolation=cv2.INTER_NEAREST,
     )
 
@@ -59,8 +60,8 @@ def _resize_to_match(arr: np.ndarray, ref_shape: Tuple[int, int]) -> np.ndarray:
 #  IoU — Intersection over Union
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def compute_iou(
-    pred_masks: List[np.ndarray],
-    gt_masks: List[np.ndarray],
+    pred_masks: list[np.ndarray],
+    gt_masks: list[np.ndarray],
     threshold: float = 0.5,
 ) -> float:
     """
@@ -78,7 +79,7 @@ def compute_iou(
 
     total_inter = 0
     total_union = 0
-    for pred, gt in zip(pred_masks[:n], gt_masks[:n]):
+    for pred, gt in zip(pred_masks[:n], gt_masks[:n], strict=True):
         p_bin = _to_binary(pred, threshold)
         g_bin = _to_binary(gt, threshold)
         if p_bin.shape != g_bin.shape:
@@ -106,7 +107,7 @@ def _make_disk(bound_radius: int) -> np.ndarray:
 
 def _bf_disk_for_shape(h: int, w: int, bound_ratio: float = DEFAULT_BOUND_RATIO) -> np.ndarray:
     """Calcule le disk adapté à une résolution (H, W)."""
-    diag = np.sqrt(h ** 2 + w ** 2)
+    diag = np.sqrt(h**2 + w**2)
     return _make_disk(max(1, int(np.round(bound_ratio * diag))))
 
 
@@ -115,7 +116,7 @@ def compute_boundary_f_measure(
     gt: np.ndarray,
     bound_ratio: float = DEFAULT_BOUND_RATIO,
     threshold: float = 0.5,
-    _disk: Optional[np.ndarray] = None,
+    _disk: np.ndarray | None = None,
 ) -> float:
     """
     Boundary F-measure binaire d'une frame (Perazzi et al. 2016, DAVIS).
@@ -141,8 +142,8 @@ def compute_boundary_f_measure(
     if max(h, w) > _BF_MAX_RES:
         scale = _BF_MAX_RES / max(h, w)
         nw, nh = int(w * scale), int(h * scale)
-        p_bin = cv2.resize(p_bin, (nw, nh), interpolation=cv2.INTER_NEAREST)
-        g_bin = cv2.resize(g_bin, (nw, nh), interpolation=cv2.INTER_NEAREST)
+        p_bin = cv2.resize(p_bin, (nw, nh), interpolation=cv2.INTER_NEAREST).astype(np.uint8)
+        g_bin = cv2.resize(g_bin, (nw, nh), interpolation=cv2.INTER_NEAREST).astype(np.uint8)
         h, w = nh, nw
         _disk = None  # recalculer pour la nouvelle résolution
 
@@ -150,7 +151,7 @@ def compute_boundary_f_measure(
     g_bound = _extract_boundary(g_bin)
 
     n_pred = int(p_bound.sum())
-    n_gt   = int(g_bound.sum())
+    n_gt = int(g_bound.sum())
     if n_pred == 0 and n_gt == 0:
         return 1.0
     if n_pred == 0 or n_gt == 0:
@@ -163,7 +164,7 @@ def compute_boundary_f_measure(
     g_dil = cv2.dilate(g_bound, _disk)
 
     precision = int(np.logical_and(p_bound, g_dil).sum()) / n_pred
-    recall    = int(np.logical_and(g_bound, p_dil).sum()) / n_gt
+    recall = int(np.logical_and(g_bound, p_dil).sum()) / n_gt
 
     if precision + recall == 0:
         return 0.0
@@ -179,9 +180,14 @@ def _warp(image: np.ndarray, flow: np.ndarray) -> np.ndarray:
     gy, gx = np.mgrid[0:h, 0:w].astype(np.float32)
     map_x = gx + flow[..., 0]
     map_y = gy + flow[..., 1]
-    return cv2.remap(image, map_x, map_y,
-                     interpolation=cv2.INTER_LINEAR,
-                     borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+    return cv2.remap(
+        image,
+        map_x,
+        map_y,
+        interpolation=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=0,
+    )
 
 
 def _lai_validity_mask(
@@ -194,7 +200,7 @@ def _lai_validity_mask(
     """Masque de validité {0,1} : cohérence forward/backward + photométrique."""
     fwd_at_t = _warp(flow_fwd, flow_bwd)
     diff_sq = ((fwd_at_t + flow_bwd) ** 2).sum(axis=-1)
-    mag_sq  = ((fwd_at_t ** 2).sum(axis=-1) + (flow_bwd ** 2).sum(axis=-1))
+    mag_sq = (fwd_at_t**2).sum(axis=-1) + (flow_bwd**2).sum(axis=-1)
     fb_ok = diff_sq <= 0.01 * mag_sq + 0.5
 
     photo_err = np.abs(frame_curr - _warp(frame_prev, flow_bwd)).mean(axis=-1)
@@ -202,8 +208,8 @@ def _lai_validity_mask(
 
 
 def compute_flow_warping_error(
-    masks: List[np.ndarray],
-    frames: Optional[Iterable[np.ndarray]] = None,
+    masks: list[np.ndarray],
+    frames: Iterable[np.ndarray] | None = None,
     threshold: float = 0.5,
     photo_threshold: float = DEFAULT_PHOTO_THRESHOLD,
     max_res: int = _FWE_MAX_RES,
@@ -224,7 +230,7 @@ def compute_flow_warping_error(
     if frames is None or len(masks) < 2:
         return 0.0
 
-    total_err   = 0.0
+    total_err = 0.0
     total_valid = 0.0
     prev_gray = prev_rgb = prev_mask = None
     dis = _DIS_FLOW
@@ -241,23 +247,24 @@ def compute_flow_warping_error(
         h, w = frame.shape[:2]
         if max(h, w) > max_res:
             scale = max_res / max(h, w)
-            frame = cv2.resize(frame, (int(w * scale), int(h * scale)),
-                               interpolation=cv2.INTER_AREA)
+            frame = cv2.resize(
+                frame, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA
+            )
         th, tw = frame.shape[:2]
 
         if frame.ndim == 3 and frame.shape[2] == 4:
             frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
 
         curr_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        curr_rgb  = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+        curr_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
 
         m = np.asarray(masks[i]).squeeze()
         t = threshold * 255.0 if m.dtype == np.uint8 else threshold
         m_bin = (m >= t).astype(np.float32)
         if m_bin.shape != (th, tw):
-            m_bin = cv2.resize(m_bin, (tw, th), interpolation=cv2.INTER_NEAREST)
+            m_bin = cv2.resize(m_bin, (tw, th), interpolation=cv2.INTER_NEAREST).astype(np.float32)
 
-        if prev_gray is not None:
+        if prev_gray is not None and prev_rgb is not None and prev_mask is not None:
             union = (m_bin + prev_mask) > 0
             ys, xs = np.where(union)
             if len(ys) > 0:
@@ -271,16 +278,19 @@ def compute_flow_warping_error(
                 bwd = dis.calc(rc, rp, None)
 
                 validity = _lai_validity_mask(
-                    prev_rgb[y1:y2, x1:x2], curr_rgb[y1:y2, x1:x2],
-                    fwd, bwd, photo_threshold,
+                    prev_rgb[y1:y2, x1:x2],
+                    curr_rgb[y1:y2, x1:x2],
+                    fwd,
+                    bwd,
+                    photo_threshold,
                 )
                 warped = _warp(prev_mask[y1:y2, x1:x2], bwd)
                 err = np.abs(m_bin[y1:y2, x1:x2] - warped)
-                total_err   += float((validity * err).sum())
+                total_err += float((validity * err).sum())
                 total_valid += float(validity.sum())
 
         prev_gray = curr_gray
-        prev_rgb  = curr_rgb
+        prev_rgb = curr_rgb
         prev_mask = m_bin
 
     gc.collect()
@@ -290,16 +300,16 @@ def compute_flow_warping_error(
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Agrégation par vidéo
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-def _compute_single_frame_bf(args: Tuple) -> float:
+def _compute_single_frame_bf(args: tuple) -> float:
     """Helper picklable pour ThreadPoolExecutor."""
     pred, gt, disk = args
     return compute_boundary_f_measure(pred, gt, _disk=disk)
 
 
 def compute_all_metrics(
-    pred_masks: List[np.ndarray],
-    gt_masks: List[np.ndarray],
-    frames: Optional[Iterable[np.ndarray]] = None,
+    pred_masks: list[np.ndarray],
+    gt_masks: list[np.ndarray],
+    frames: Iterable[np.ndarray] | None = None,
     threshold: float = 0.5,
 ) -> dict:
     """
@@ -313,9 +323,13 @@ def compute_all_metrics(
     n = min(len(pred_masks), len(gt_masks))
     if n == 0:
         logger.error("Aucun masque disponible.")
-        return {"iou_mean": 0.0, "iou_std": 0.0,
-                "boundary_f_mean": 0.0, "boundary_f_std": 0.0,
-                "flow_warping_error": 0.0}
+        return {
+            "iou_mean": 0.0,
+            "iou_std": 0.0,
+            "boundary_f_mean": 0.0,
+            "boundary_f_std": 0.0,
+            "flow_warping_error": 0.0,
+        }
 
     # Disk BF pré-calculé à la résolution effective (après downsample à 540p)
     ref = np.asarray(gt_masks[0]).squeeze()
@@ -329,7 +343,7 @@ def compute_all_metrics(
 
     # BF en parallèle (ThreadPool — OpenCV libère le GIL pour les ops morpho)
     n_workers = min(8, n)
-    args = [(p, g, disk) for p, g in zip(pred_masks[:n], gt_masks[:n])]
+    args = [(p, g, disk) for p, g in zip(pred_masks[:n], gt_masks[:n], strict=True)]
     with ThreadPoolExecutor(max_workers=n_workers) as executor:
         boundary_fs = list(executor.map(_compute_single_frame_bf, args))
 

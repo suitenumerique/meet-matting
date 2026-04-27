@@ -15,13 +15,13 @@ BENCHMARK_ROOT = Path(os.path.dirname(os.path.abspath(__file__)))
 # Datasets disponibles
 DATASETS = {
     "Synthetic (Fond Faux)": BENCHMARK_ROOT / "dataset",
-    "Real (Vidéos Masques)": BENCHMARK_ROOT / "videos_masques"
+    "Real (Vidéos Masques)": BENCHMARK_ROOT / "videos_masques",
 }
 
 # Par défaut, on utilise le premier dataset
 DEFAULT_DATASET_DIR = DATASETS["Synthetic (Fond Faux)"]
 
-# Chemins dynamiques (seront mis à jour par le runner si besoin, 
+# Chemins dynamiques (seront mis à jour par le runner si besoin,
 # mais on garde ces variables pour la compatibilité descendante)
 VIDEOS_DIR = DEFAULT_DATASET_DIR / "videos"
 GROUND_TRUTH_DIR = DEFAULT_DATASET_DIR / "ground_truth"

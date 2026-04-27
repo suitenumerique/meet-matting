@@ -3,8 +3,8 @@ Wrapper pour le modèle MediaPipe Selfie Multiclass.
 """
 
 import logging
-from pathlib import Path
 import urllib.request
+from pathlib import Path
 
 from .mediapipe_selfie import BaseMediapipeWrapper
 
@@ -18,6 +18,7 @@ _MODEL_URLS = {
     ),
 }
 
+
 class MediapipeSelfieMulticlassWrapper(BaseMediapipeWrapper):
     _variant = "selfie_multiclass"
 
@@ -26,19 +27,25 @@ class MediapipeSelfieMulticlassWrapper(BaseMediapipeWrapper):
         return "MediaPipe Selfie Multiclass"
 
     def load(self) -> None:
-        # Override load pour utiliser les bons URLs localement si besoin, 
+        # Override load pour utiliser les bons URLs localement si besoin,
         # ou on injecte l'URL dans la classe parente.
         # Pour simplifier, on duplique la logique de chargement ou on l'adapte.
         try:
             import mediapipe as mp
             from mediapipe.tasks.python import BaseOptions
-            from mediapipe.tasks.python.vision import ImageSegmenter, ImageSegmenterOptions, RunningMode
+            from mediapipe.tasks.python.vision import (
+                ImageSegmenter,
+                ImageSegmenterOptions,
+                RunningMode,
+            )
         except ImportError as e:
-            raise ImportError("mediapipe est requis. Installe-le via : pip install mediapipe") from e
+            raise ImportError(
+                "mediapipe est requis. Installe-le via : pip install mediapipe"
+            ) from e
 
         weights_dir = Path(__file__).parent.parent / "weights"
         weights_dir.mkdir(parents=True, exist_ok=True)
-        
+
         model_filename = _MODEL_URLS[self._variant].split("/")[-1]
         local_path = weights_dir / model_filename
 
@@ -47,10 +54,9 @@ class MediapipeSelfieMulticlassWrapper(BaseMediapipeWrapper):
 
         options = ImageSegmenterOptions(
             base_options=BaseOptions(
-                model_asset_path=str(local_path),
-                delegate=BaseOptions.Delegate.GPU
+                model_asset_path=str(local_path), delegate=BaseOptions.Delegate.GPU
             ),
-            running_mode=RunningMode.VIDEO, 
+            running_mode=RunningMode.VIDEO,
             output_category_mask=False,
             output_confidence_masks=True,
         )

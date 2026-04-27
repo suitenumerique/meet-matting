@@ -8,9 +8,9 @@ Ce modèle est entraîné sur COCO/VOC avec une classe "person" (label 15).
 """
 
 import logging
+
 import cv2
 import numpy as np
-from typing import List, Optional, Tuple
 
 from .base import BaseModelWrapper
 
@@ -36,7 +36,7 @@ class MobileNetV3LRASPPWrapper(BaseModelWrapper):
         return "MobileNetV3 + LRASPP"
 
     @property
-    def input_size(self) -> Optional[Tuple[int, int]]:
+    def input_size(self) -> tuple[int, int] | None:
         return (256, 256)
 
     def load(self) -> None:
@@ -45,8 +45,7 @@ class MobileNetV3LRASPPWrapper(BaseModelWrapper):
             import torchvision.models.segmentation as seg_models
         except ImportError as e:
             raise ImportError(
-                "torch et torchvision sont requis. "
-                "Installe-les via : pip install torch torchvision"
+                "torch et torchvision sont requis. Installe-les via : pip install torch torchvision"
             ) from e
 
         if torch.cuda.is_available():
@@ -64,14 +63,12 @@ class MobileNetV3LRASPPWrapper(BaseModelWrapper):
         self._model.eval()
 
         self._torch = torch
-        logger.info(
-            "MobileNetV3+LRASPP: modèle chargé sur %s.", self._device
-        )
+        logger.info("MobileNetV3+LRASPP: modèle chargé sur %s.", self._device)
 
     def predict(self, frame_bgr: np.ndarray) -> np.ndarray:
         return self.predict_batch([frame_bgr])[0]
 
-    def predict_batch(self, frames_bgr: List[np.ndarray]) -> List[np.ndarray]:
+    def predict_batch(self, frames_bgr: list[np.ndarray]) -> list[np.ndarray]:
         if self._model is None:
             raise RuntimeError("MobileNetV3+LRASPP: modèle non chargé.")
 
@@ -87,7 +84,7 @@ class MobileNetV3LRASPPWrapper(BaseModelWrapper):
         tensors = []
         mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
         std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
-        
+
         for frame in frames_bgr:
             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             frame_resized = cv2.resize(frame_rgb, (256, 256))
@@ -102,7 +99,7 @@ class MobileNetV3LRASPPWrapper(BaseModelWrapper):
 
         # Extraire la probabilité de la classe "person"
         probs = torch.softmax(output, dim=1)
-        
+
         masks = []
         for i in range(batch_size):
             person_mask = probs[i, self.PERSON_CLASS_INDEX].cpu().numpy()
@@ -116,11 +113,11 @@ class MobileNetV3LRASPPWrapper(BaseModelWrapper):
 
         return masks
 
-    def get_flops(self, input_shape: Tuple[int, int, int] = (3, 256, 256)) -> float:
+    def get_flops(self, input_shape: tuple[int, int, int] = (3, 256, 256)) -> float:
         try:
             import torch
             from fvcore.nn import FlopCountAnalysis
-            
+
             # Silence internal fvcore warnings about unsupported operators
             logging.getLogger("fvcore.nn.jit_analysis").setLevel(logging.ERROR)
 
@@ -128,9 +125,7 @@ class MobileNetV3LRASPPWrapper(BaseModelWrapper):
             flops = FlopCountAnalysis(self._model, dummy).unsupported_ops_warnings(False)
             return float(flops.total())
         except ImportError:
-            logger.warning(
-                "fvcore non disponible, retour aux estimations."
-            )
+            logger.warning("fvcore non disponible, retour aux estimations.")
             # ~70 MFLOPs pour MobileNetV3-Large + LRASPP à 256x256
             c, h, w = input_shape
             return 70e6 * (h * w) / (256 * 256)
@@ -144,6 +139,7 @@ class MobileNetV3LRASPPWrapper(BaseModelWrapper):
             self._model = None
             try:
                 import torch
+
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
             except Exception:

@@ -11,18 +11,19 @@ Modèle : https://github.com/ZHKKKe/MODNet
 
 import logging
 from pathlib import Path
+from typing import Any
+
 import cv2
 import numpy as np
-from typing import List, Optional, Tuple
 
 from .base import BaseModelWrapper
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_MODEL_PATH = Path(__file__).parent.parent / "weights" / "modnet_photographic_portrait_matting.onnx"
-_MODEL_URL = (
-    "https://huggingface.co/Xenova/modnet/resolve/main/onnx/model.onnx?download=true"
+_DEFAULT_MODEL_PATH = (
+    Path(__file__).parent.parent / "weights" / "modnet_photographic_portrait_matting.onnx"
 )
+_MODEL_URL = "https://huggingface.co/Xenova/modnet/resolve/main/onnx/model.onnx?download=true"
 
 
 class MODNetWrapper(BaseModelWrapper):
@@ -33,10 +34,10 @@ class MODNetWrapper(BaseModelWrapper):
     Output : alpha matte (1, 1, H, W) dans [0, 1].
     """
 
-    def __init__(self, model_path: Optional[str] = None):
+    def __init__(self, model_path: str | None = None):
         self._model_path = Path(model_path) if model_path else _DEFAULT_MODEL_PATH
-        self._session = None
-        self._input_name = None
+        self._session: Any = None
+        self._input_name: str | None = None
         self._ref_size = 512  # MODNet attend des multiples de 32, typiquement 512
 
     @property
@@ -44,7 +45,7 @@ class MODNetWrapper(BaseModelWrapper):
         return "MODNet"
 
     @property
-    def input_size(self) -> Optional[Tuple[int, int]]:
+    def input_size(self) -> tuple[int, int] | None:
         return (self._ref_size, self._ref_size)
 
     def load(self) -> None:
@@ -71,22 +72,23 @@ class MODNetWrapper(BaseModelWrapper):
         sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
 
         # CoreML specific optimizations if on Mac
-        actual_providers = []
+        actual_providers: list[str | tuple[str, dict[str, Any]]] = []
         for p in selected_providers:
             if p == "CoreMLExecutionProvider":
                 actual_providers.append(
-                    ("CoreMLExecutionProvider", {
-                        "MLComputeUnits": "ALL",
-                        "convert_model_to_fp16": True  # Enable FP16 inference on Mac
-                    })
+                    (
+                        "CoreMLExecutionProvider",
+                        {
+                            "MLComputeUnits": "ALL",
+                            "convert_model_to_fp16": True,  # Enable FP16 inference on Mac
+                        },
+                    )
                 )
             else:
                 actual_providers.append(p)
 
         self._session = ort.InferenceSession(
-            str(self._model_path), 
-            providers=actual_providers,
-            sess_options=sess_options
+            str(self._model_path), providers=actual_providers, sess_options=sess_options
         )
         self._input_name = self._session.get_inputs()[0].name
         logger.info("MODNet: modèle ONNX chargé (%s).", self._model_path.name)
@@ -102,7 +104,7 @@ class MODNetWrapper(BaseModelWrapper):
     def predict(self, frame_bgr: np.ndarray) -> np.ndarray:
         return self.predict_batch([frame_bgr])[0]
 
-    def predict_batch(self, frames_bgr: List[np.ndarray]) -> List[np.ndarray]:
+    def predict_batch(self, frames_bgr: list[np.ndarray]) -> list[np.ndarray]:
         if self._session is None:
             raise RuntimeError("MODNet: modèle non chargé. Appelle load() d'abord.")
 
@@ -111,7 +113,7 @@ class MODNetWrapper(BaseModelWrapper):
             return []
 
         h_orig, w_orig = frames_bgr[0].shape[:2]
-        
+
         # Pre-processing : BGR -> RGB, resize, normalise
         tensors = []
         for frame in frames_bgr:
@@ -121,7 +123,7 @@ class MODNetWrapper(BaseModelWrapper):
             # Normalisation [0, 1] puis standardisation MODNet
             tensor = frame_resized.astype(np.float32) / 255.0
             tensor = (tensor - 0.5) / 0.5  # [-1, 1]
-            tensor = np.transpose(tensor, (2, 0, 1))   # CHW
+            tensor = np.transpose(tensor, (2, 0, 1))  # CHW
             tensors.append(tensor)
 
         # Concaténer pour former un batch (N, 3, H, W)
@@ -151,12 +153,12 @@ class MODNetWrapper(BaseModelWrapper):
             # Resize vers la taille originale
             if mask.shape != (h_orig, w_orig):
                 mask = cv2.resize(mask, (w_orig, h_orig), interpolation=cv2.INTER_LINEAR)
-            
+
             masks.append(mask.astype(np.float32))
 
         return masks
 
-    def get_flops(self, input_shape: Tuple[int, int, int] = (3, 256, 256)) -> float:
+    def get_flops(self, input_shape: tuple[int, int, int] = (3, 256, 256)) -> float:
         # MODNet : ~4 GFLOPs à 512x512
         c, h, w = input_shape
         base_flops = 4e9

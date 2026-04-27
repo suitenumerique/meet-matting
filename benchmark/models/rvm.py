@@ -13,7 +13,7 @@ Modèle : https://github.com/PeterL1n/RobustVideoMatting
 
 import logging
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Any
 
 import cv2
 import numpy as np
@@ -38,18 +38,18 @@ class RVMWrapper(BaseModelWrapper):
     reset_state() doit être appelé au début de chaque nouvelle vidéo.
     """
 
-    def __init__(self, model_path: Optional[str] = None, downsample_ratio: float = 0.25):
+    def __init__(self, model_path: str | None = None, downsample_ratio: float = 0.25):
         self._model_path = Path(model_path) if model_path else _DEFAULT_MODEL_PATH
         self._downsample_ratio = downsample_ratio
-        self._session = None
-        self._recurrent_state = None
+        self._session: Any = None
+        self._recurrent_state: dict[str, np.ndarray] = {}
 
     @property
     def name(self) -> str:
         return "RVM (MobileNetV3)"
 
     @property
-    def input_size(self) -> Optional[Tuple[int, int]]:
+    def input_size(self) -> tuple[int, int] | None:
         return None  # Dynamique, dépend de la vidéo
 
     def load(self) -> None:
@@ -78,19 +78,15 @@ class RVMWrapper(BaseModelWrapper):
         sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
 
         # CoreML specific optimizations if on Mac
-        actual_providers = []
+        actual_providers: list[str | tuple[str, dict[str, Any]]] = []
         for p in selected_providers:
             if p == "CoreMLExecutionProvider":
-                actual_providers.append(
-                    ("CoreMLExecutionProvider", {"MLComputeUnits": "ALL"})
-                )
+                actual_providers.append(("CoreMLExecutionProvider", {"MLComputeUnits": "ALL"}))
             else:
                 actual_providers.append(p)
 
         self._session = ort.InferenceSession(
-            str(self._model_path), 
-            providers=actual_providers,
-            sess_options=sess_options
+            str(self._model_path), providers=actual_providers, sess_options=sess_options
         )
         self.reset_state()
         logger.info("RVM: modèle ONNX chargé (%s).", self._model_path.name)
@@ -123,7 +119,7 @@ class RVMWrapper(BaseModelWrapper):
         frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
         tensor = frame_rgb.astype(np.float32) / 255.0
         tensor = np.transpose(tensor, (2, 0, 1))  # CHW
-        tensor = np.expand_dims(tensor, axis=0)     # NCHW
+        tensor = np.expand_dims(tensor, axis=0)  # NCHW
 
         # Inférence
         inputs = {
@@ -155,7 +151,7 @@ class RVMWrapper(BaseModelWrapper):
 
         return mask.astype(np.float32)
 
-    def get_flops(self, input_shape: Tuple[int, int, int] = (3, 256, 256)) -> float:
+    def get_flops(self, input_shape: tuple[int, int, int] = (3, 256, 256)) -> float:
         # RVM MobileNetV3 : ~600 MFLOPs à 256x256
         c, h, w = input_shape
         base_flops = 600e6  # pour 256x256
@@ -164,5 +160,5 @@ class RVMWrapper(BaseModelWrapper):
 
     def cleanup(self) -> None:
         self._session = None
-        self._recurrent_state = None
+        self._recurrent_state = {}
         logger.info("RVM: session ONNX fermée.")

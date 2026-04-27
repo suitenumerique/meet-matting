@@ -161,8 +161,7 @@ def main() -> None:
 
     if not args.gt_dir.exists():
         logger.warning(
-            "Répertoire GT introuvable : %s — les métriques de qualité "
-            "ne seront pas calculées.",
+            "Répertoire GT introuvable : %s — les métriques de qualité ne seront pas calculées.",
             args.gt_dir,
         )
         args.gt_dir.mkdir(parents=True, exist_ok=True)
@@ -201,7 +200,11 @@ def main() -> None:
 
         iou = f"{r.get('iou_mean', 0):.4f}" if r.get("iou_mean") is not None else "N/A"
         bf = f"{r.get('boundary_f_mean', 0):.4f}" if r.get("boundary_f_mean") is not None else "N/A"
-        fwe = f"{r.get('flow_warping_error', 0):.4f}" if r.get("flow_warping_error") is not None else "N/A"
+        fwe = (
+            f"{r.get('flow_warping_error', 0):.4f}"
+            if r.get("flow_warping_error") is not None
+            else "N/A"
+        )
         p95 = f"{r.get('latency_p95_ms', 0):.2f}"
         flops = r.get("flops_per_frame", -1)
         flops_str = f"{flops:.2e}" if flops and flops > 0 else "N/A"
