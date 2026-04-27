@@ -1,0 +1,41 @@
+{
+  "model_key": "rvm",
+  "methods": [
+    {
+      "name": "gaussian_blur",
+      "enabled": true,
+      "params": {
+        "ksize": 3,
+        "sigma": 0.5
+      }
+    },
+    {
+      "name": "morphological_close",
+      "enabled": true,
+      "params": {
+        "ksize": 3
+      }
+    },
+    {
+      "name": "alpha_gamma",
+      "enabled": true,
+      "params": {
+        "gamma": 0.5
+      }
+    },
+    {
+      "name": "temporal_ema",
+      "enabled": false,
+      "params": {
+        "alpha": 0.7
+      }
+    },
+    {
+      "name": "binarize",
+      "enabled": false,
+      "params": {
+        "threshold": 0.5
+      }
+    }
+  ]
+}

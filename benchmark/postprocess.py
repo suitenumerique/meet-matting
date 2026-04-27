@@ -81,6 +81,14 @@ METHODS_BY_MODEL: Dict[str, List[Dict[str, Any]]] = {
                 "ksize": {"default": 11, "min": 5, "max": 21, "step": 2, "type": "int"},
             },
         },
+        {
+            "name": "binarize",
+            "label": "Seuil de binarisation",
+            "description": "Binarise le masque final (pixel ≥ seuil → 1.0, sinon 0.0)",
+            "params": {
+                "threshold": {"default": 0.5, "min": 0.05, "max": 0.95, "step": 0.05, "type": "float"},
+            },
+        },
     ],
     "mobilenetv3_lraspp": [
         {
@@ -131,6 +139,14 @@ METHODS_BY_MODEL: Dict[str, List[Dict[str, Any]]] = {
             "description": "Bouche les trous entièrement entourés de foreground",
             "params": {},
         },
+        {
+            "name": "binarize",
+            "label": "Seuil de binarisation",
+            "description": "Binarise le masque final (pixel ≥ seuil → 1.0, sinon 0.0)",
+            "params": {
+                "threshold": {"default": 0.5, "min": 0.05, "max": 0.95, "step": 0.05, "type": "float"},
+            },
+        },
     ],
     "rvm": [
         {
@@ -164,6 +180,14 @@ METHODS_BY_MODEL: Dict[str, List[Dict[str, Any]]] = {
             "description": "Lissage temporel supplémentaire sur l'alpha",
             "params": {
                 "alpha": {"default": 0.7, "min": 0.5, "max": 0.95, "step": 0.05, "type": "float"},
+            },
+        },
+        {
+            "name": "binarize",
+            "label": "Seuil de binarisation",
+            "description": "Binarise le masque final (pixel ≥ seuil → 1.0, sinon 0.0)",
+            "params": {
+                "threshold": {"default": 0.5, "min": 0.05, "max": 0.95, "step": 0.05, "type": "float"},
             },
         },
     ],
@@ -274,6 +298,10 @@ def _alpha_gamma(mask: np.ndarray, gamma: float) -> np.ndarray:
     return np.power(np.clip(mask, 0.0, 1.0), float(gamma)).astype(np.float32)
 
 
+def _binarize(mask: np.ndarray, threshold: float) -> np.ndarray:
+    return (mask >= float(threshold)).astype(np.float32)
+
+
 # ─── Classe PostProcessor ─────────────────────────────────────────────────────
 
 class PostProcessor:
@@ -349,6 +377,9 @@ class PostProcessor:
 
                 elif name == "alpha_gamma":
                     m = _alpha_gamma(m, params.get("gamma", 1.0))
+
+                elif name == "binarize":
+                    m = _binarize(m, params.get("threshold", 0.5))
 
                 else:
                     logger.warning("Méthode de post-process inconnue : %s", name)

@@ -11,6 +11,13 @@ Offre une interface moderne pour :
 import io
 import json
 import os
+<<<<<<< HEAD
+=======
+from typing import List
+# Désactivation TOTALE des logs MediaPipe/GLog au démarrage
+os.environ['GLOG_minloglevel'] = '2'
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+>>>>>>> 674b3ef (post-processing visuel)
 
 # Désactivation TOTALE des logs MediaPipe/GLog au démarrage
 os.environ["GLOG_minloglevel"] = "2"
@@ -56,6 +63,7 @@ from benchmark.config import DATASETS, GROUND_TRUTH_DIR, OUTPUT_DIR, TEMP_RESULT
 from benchmark.postprocess import (
     METHODS_BY_MODEL,
     SUPPORTED_MODELS as PP_SUPPORTED_MODELS,
+    PostProcessor,
     load_config as pp_load_config,
     save_config as pp_save_config,
     _default_config as pp_default_config,
@@ -406,11 +414,12 @@ curr_videos_dir = curr_dataset_root / "videos"
 curr_gt_dir = curr_dataset_root / "ground_truth"
 
 # ── Tabs ─────────────────────────────────────────────────────────────────────
-tab1, tab2, tab3, tab4 = st.tabs([
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "🚀 Benchmark complet",
     "📊 Métriques sur outputs",
     "🖼️ Comparateur visuel",
     "⚙️ Post-processing",
+    "🗄️ Données",
 ])
 
 
@@ -526,7 +535,12 @@ with tab1:
 
     with col_run:
         st.subheader("ℹ️ Aperçu")
-        n_seq = num_videos if num_videos > 0 else total_videos
+        if video_indices:
+            n_seq = len(video_indices)
+        elif num_videos > 0:
+            n_seq = num_videos
+        else:
+            n_seq = total_videos
         st.info(f"""
 - **Vidéos détectées** : {total_videos}
 - **Séquences à traiter** : {n_seq}
@@ -613,7 +627,12 @@ with tab1:
             st.rerun()
 
     # Live panel — shows progress even when tab is not active
-    n_seq = num_videos if num_videos > 0 else total_videos
+    if video_indices:
+        n_seq = len(video_indices)
+    elif num_videos > 0:
+        n_seq = num_videos
+    else:
+        n_seq = total_videos
     total_combos = len(selected_models) * n_seq
     if st.session_state.get("t1_running") or st.session_state.get("t1_results"):
         _t1_live_panel(total_combos)
@@ -740,10 +759,10 @@ with tab3:
         "et la **vérité terrain** sans relancer l'inférence."
     )
 
-    # ── Mode photo / vidéo ────────────────────────────────────────────────────
+    # ── Mode photo / vidéo / comparaison ─────────────────────────────────────
     view_mode = st.radio(
         "Mode d'affichage",
-        options=["📷 Mode photo", "🎬 Mode vidéo"],
+        options=["📷 Mode photo", "🎬 Mode vidéo", "🔄 Mode comparaison"],
         horizontal=True,
         key="t3_view_mode",
     )
@@ -786,9 +805,134 @@ with tab3:
                 if stems:
                     pairs_index[md.name] = {"stems": stems, "base": md, "model_dir": md.name}
 
+    # Index par modèle de base (pour mode comparaison)
+    # base_model_index: model_dir_name → list of (label, entry_dict)
+    base_model_index: dict = {}
+    for _k, _v in pairs_index.items():
+        _base = _v["model_dir"]
+        base_model_index.setdefault(_base, []).append((_k, _v))
+
     if not pairs_index:
         st.warning("Aucun masque trouvé. Lancez d'abord un benchmark.")
+
+    # ══════════════════════════════════════════════════════════════════════════
+    #  MODE COMPARAISON — plusieurs runs du même modèle côte à côte
+    # ══════════════════════════════════════════════════════════════════════════
+    elif view_mode == "🔄 Mode comparaison":
+        st.markdown("Comparez les **différentes versions post-processées** d'un même modèle côte à côte.")
+
+        # Sélection du modèle de base et de la vidéo
+        comp_col1, comp_col2 = st.columns(2)
+        with comp_col1:
+            comp_base_model = st.selectbox(
+                "Modèle de base",
+                options=list(base_model_index.keys()),
+                format_func=lambda x: x.replace("_", " "),
+                key="t3_comp_model",
+            )
+        # Trouver les vidéos communes à tous les runs de ce modèle
+        _all_runs = base_model_index.get(comp_base_model, [])
+        _common_stems: List[str] = []
+        if _all_runs:
+            _stem_sets = [set(entry["stems"]) for _, entry in _all_runs]
+            _common_stems = sorted(set.union(*_stem_sets))
+        with comp_col2:
+            comp_video = st.selectbox(
+                "Vidéo",
+                options=_common_stems,
+                key="t3_comp_video",
+            )
+
+        if comp_base_model and comp_video and _all_runs:
+            # Slider frame partagé
+            _ref_entry = _all_runs[0][1]
+            _ref_mask = _ref_entry["base"] / f"{comp_video}_{_ref_entry['model_dir']}_mask.mp4"
+            _ref_seg  = _ref_entry["base"] / f"{comp_video}_{_ref_entry['model_dir']}_segmented.mp4"
+            _ref_path = _ref_mask if _ref_mask.exists() else (_ref_seg if _ref_seg.exists() else None)
+            _n_frames_comp = 1
+            if _ref_path and _ref_path.exists():
+                _n_frames_comp, _, _ = _get_video_info(_ref_path)
+
+            comp_frame_idx = st.slider(
+                "Numéro de frame (partagé)",
+                min_value=0, max_value=max(0, _n_frames_comp - 1),
+                value=0, key="t3_comp_frame",
+            )
+
+            src_path_comp = curr_videos_dir / f"{comp_video}.mp4"
+            src_frame = get_frame_at(src_path_comp, comp_frame_idx) if src_path_comp.exists() else None
+
+            # Afficher la frame source
+            st.markdown("---")
+            if src_frame is not None:
+                st.markdown("**Frame source**")
+                st.image(cv2.cvtColor(src_frame, cv2.COLOR_BGR2RGB), width=300)
+
+            st.markdown("---")
+            st.markdown(f"**Comparaison de {len(_all_runs)} version(s) — `{comp_base_model.replace('_',' ')}`**")
+
+            # Colonnes : une par run
+            _ncols = len(_all_runs)
+            _comp_cols = st.columns(_ncols)
+            for col_idx, (run_key, run_entry) in enumerate(_all_runs):
+                _run_base = run_entry["base"]
+                _run_mdir = run_entry["model_dir"]
+                _mask_p = _run_base / f"{comp_video}_{_run_mdir}_mask.mp4"
+                _seg_p  = _run_base / f"{comp_video}_{_run_mdir}_segmented.mp4"
+
+                # Libellé du run
+                if "/" in run_key:
+                    _run_label = run_key.split("/")[1]
+                else:
+                    _run_label = "Sans run (brut)"
+
+                with _comp_cols[col_idx]:
+                    st.markdown(f"**{_run_label}**")
+
+                    # Config post-process
+                    _rc_path = _run_base / "run_config.json"
+                    _legacy_pp = _run_base / "postprocess_config.json"
+                    _pp_methods = []
+                    if _rc_path.exists():
+                        try:
+                            _rc = json.loads(_rc_path.read_text())
+                            _pp_cfg = _rc.get("postprocess_config") or {}
+                            _pp_methods = [m["name"] for m in _pp_cfg.get("methods", []) if m.get("enabled")]
+                        except Exception:
+                            pass
+                    elif _legacy_pp.exists():
+                        try:
+                            _pp_cfg = json.loads(_legacy_pp.read_text())
+                            _pp_methods = [m["name"] for m in _pp_cfg.get("methods", []) if m.get("enabled")]
+                        except Exception:
+                            pass
+                    st.caption("🔧 " + (", ".join(_pp_methods) if _pp_methods else "Aucun post-process"))
+
+                    # Masque
+                    _mask_frame = None
+                    if _mask_p.exists():
+                        _mask_frame = get_frame_at(_mask_p, comp_frame_idx)
+                    elif _seg_p.exists():
+                        _sf = get_frame_at(_seg_p, comp_frame_idx)
+                        if _sf is not None:
+                            _sr = cv2.cvtColor(_sf, cv2.COLOR_BGR2RGB)
+                            _mask_frame = cv2.cvtColor(
+                                (np.any(_sr > 10, axis=2).astype(np.uint8) * 255),
+                                cv2.COLOR_GRAY2BGR,
+                            )
+                    if _mask_frame is not None:
+                        _gray = cv2.cvtColor(_mask_frame, cv2.COLOR_BGR2GRAY) if _mask_frame.ndim == 3 else _mask_frame
+                        st.image(_gray, clamp=True, use_container_width=True)
+                    else:
+                        st.warning("Masque introuvable")
+
+                    # Vidéo masque
+                    if _mask_p.exists():
+                        with st.expander("🎬 Voir vidéo"):
+                            st.video(open(_mask_p, "rb"))
+
     else:
+        # Modes photo et vidéo — sélecteur classique
         col_sel1, col_sel2 = st.columns(2)
         with col_sel1:
             chosen_model_key = st.selectbox(
@@ -817,12 +961,31 @@ with tab3:
             # dest_base is run_dir / video_path.stem, so DEBUG files are in run_dir
             dbg_union = _t3_base / f"{chosen_video}_DEBUG_union.mp4"
 
-            # Show postprocess_config.json if available in this run directory
-            _pp_json_path = _t3_base / "postprocess_config.json"
-            if _pp_json_path.exists():
-                with st.expander("🔧 Config post-processing de ce run", expanded=False):
+            # Afficher les infos du run si disponibles
+            _rc_path_t3 = _t3_base / "run_config.json"
+            _legacy_path_t3 = _t3_base / "postprocess_config.json"
+            if _rc_path_t3.exists():
+                with st.expander("ℹ️ Infos du run", expanded=False):
                     try:
-                        st.json(json.loads(_pp_json_path.read_text()))
+                        _rc_data = json.loads(_rc_path_t3.read_text())
+                        _c1, _c2 = st.columns(2)
+                        with _c1:
+                            st.markdown(f"**Run #{_rc_data.get('run_id', '?')}** — {_rc_data.get('timestamp', '')[:19]}")
+                            _settings = _rc_data.get("settings", {})
+                            st.caption(" · ".join(k for k, v in _settings.items() if v))
+                        with _c2:
+                            _pp_c = _rc_data.get("postprocess_config") or {}
+                            _active_pp = [m["name"] for m in _pp_c.get("methods", []) if m.get("enabled")]
+                            st.markdown("**Post-process :** " + (", ".join(f"`{m}`" for m in _active_pp) if _active_pp else "aucun"))
+                            _summ = _rc_data.get("results_summary", {})
+                            if _summ:
+                                st.caption(f"IoU {_summ.get('iou_mean','?')} · BF {_summ.get('boundary_f_mean','?')} · {_summ.get('successful','?')}/{_summ.get('total_videos','?')} vidéos OK")
+                    except Exception:
+                        st.warning("Config illisible.")
+            elif _legacy_path_t3.exists():
+                with st.expander("🔧 Config post-processing (ancien format)", expanded=False):
+                    try:
+                        st.json(json.loads(_legacy_path_t3.read_text()))
                     except Exception:
                         st.warning("Config illisible.")
 
@@ -1034,127 +1197,593 @@ with tab3:
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  TAB 4 — Post-processing configuration
+#  TAB 4 — Post-processing : aperçu visuel sur une frame
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+@st.cache_resource(show_spinner=False)
+def _t4_load_model(model_key: str):
+    m = MODEL_REGISTRY[model_key]()
+    m.load()
+    return m
+
+
+def _t4_run_inference(model_key: str, video_path: Path, frame_idx: int, window_size: int):
+    """Run model on `window_size` frames ending at frame_idx. Cache hit avoids re-inference when only post-process params change."""
+    cache: dict = st.session_state.setdefault("_t4_inf_cache", {})
+    key = (model_key, str(video_path), int(frame_idx), int(window_size))
+    if key in cache:
+        return cache[key]
+
+    model = _t4_load_model(model_key)
+    model.reset_state()
+    start = max(0, frame_idx - window_size + 1)
+    cap = cv2.VideoCapture(str(video_path))
+    cap.set(cv2.CAP_PROP_POS_FRAMES, start)
+    frames = []
+    for _ in range(frame_idx - start + 1):
+        ret, f = cap.read()
+        if not ret:
+            break
+        frames.append(f)
+    cap.release()
+    if not frames:
+        return [], []
+
+    masks = model.predict_batch(frames)
+    masks = [np.asarray(m, dtype=np.float32).squeeze() for m in masks]
+
+    if len(cache) > 4:
+        cache.pop(next(iter(cache)))
+    cache[key] = (frames, masks)
+    return frames, masks
+
+
+def _t4_apply_pp(frames, masks, methods):
+    pp = PostProcessor({"methods": methods})
+    pp.reset()
+    return [pp.apply(m, frame_bgr=f) for m, f in zip(masks, frames)]
+
+
+def _t4_get_gt_at(gt_path: Path, frame_idx: int):
+    if not gt_path or not gt_path.exists():
+        return None
+    masks = _load_ground_truth_masks(gt_path, frame_idx + 1)
+    if not masks or len(masks) <= frame_idx:
+        return None
+    m = masks[frame_idx]
+    if m.dtype == np.uint8:
+        m = m.astype(np.float32) / 255.0
+    return np.clip(m, 0.0, 1.0)
+
+
+def _t4_overlay(frame_bgr, mask):
+    h, w = frame_bgr.shape[:2]
+    if mask.shape != (h, w):
+        mask = cv2.resize(mask, (w, h), interpolation=cv2.INTER_LINEAR)
+    bg = np.full_like(frame_bgr, (40, 40, 40))
+    m3 = np.dstack([mask] * 3)
+    out = (frame_bgr.astype(np.float32) * m3 + bg.astype(np.float32) * (1 - m3)).astype(np.uint8)
+    return cv2.cvtColor(out, cv2.COLOR_BGR2RGB)
+
+
 with tab4:
-    st.title("⚙️ Configuration Post-processing")
-    st.markdown(
-        "Configurez les méthodes de post-processing pour les 3 modèles les plus performants. "
-        "La configuration sera automatiquement appliquée lors du prochain benchmark."
+    st.title("⚙️ Post-processing — aperçu visuel")
+    st.caption(
+        "Ajustez les méthodes et **prévisualisez** leur effet sur une frame "
+        "en comparant le masque brut au masque post-traité. "
+        "La config sauvegardée est utilisée lors du prochain benchmark."
     )
 
-    # Noms d'affichage des modèles supportés
     _PP_MODEL_LABELS = {
         "mediapipe_portrait": "MediaPipe Portrait",
         "mobilenetv3_lraspp": "MobileNetV3 + LRASPP",
         "rvm": "RVM (MobileNetV3)",
     }
 
-    chosen_pp_model = st.selectbox(
-        "Modèle à configurer",
-        options=list(_PP_MODEL_LABELS.keys()),
-        format_func=lambda k: _PP_MODEL_LABELS[k],
-        key="t4_model",
-    )
+    col_cfg, col_prev = st.columns([1, 2], gap="large")
 
-    st.divider()
+    with col_cfg:
+        chosen_pp_model = st.selectbox(
+            "Modèle",
+            options=list(_PP_MODEL_LABELS.keys()),
+            format_func=lambda k: _PP_MODEL_LABELS[k],
+            key="t4_model",
+        )
 
-    # Charger la config actuelle
-    current_cfg = pp_load_config(chosen_pp_model)
-    methods_def = METHODS_BY_MODEL.get(chosen_pp_model, [])
+        _t4_pairs = discover_datasets(curr_videos_dir, curr_gt_dir)
+        if not _t4_pairs:
+            st.warning("Aucune vidéo trouvée pour ce dataset.")
+            st.stop()
 
-    # Construire un dict méthode_name → config actuelle pour lookup rapide
-    current_methods_by_name = {m["name"]: m for m in current_cfg.get("methods", [])}
+        _video_options = {p[0].name: p for p in _t4_pairs}
+        _chosen_video_name = st.selectbox(
+            "Vidéo source",
+            options=list(_video_options.keys()),
+            key="t4_video",
+        )
+        _video_path, _gt_path = _video_options[_chosen_video_name]
 
-    st.subheader("🔧 Méthodes disponibles")
-    new_methods = []
+        try:
+            _n_frames, _fps, _ = _get_video_info(_video_path)
+        except IOError:
+            st.error("Impossible d'ouvrir la vidéo.")
+            st.stop()
 
-    for method_def in methods_def:
-        mname = method_def["name"]
-        mlabel = method_def["label"]
-        mdesc = method_def["description"]
-        params_def = method_def["params"]
+        if _n_frames <= 0:
+            st.error("Vidéo vide.")
+            st.stop()
 
-        # Récupérer l'état actuel
-        cur = current_methods_by_name.get(mname, {})
-        cur_enabled = cur.get("enabled", False)
-        cur_params = cur.get("params", {})
+        _frame_idx = st.slider(
+            "Frame index",
+            0, max(0, _n_frames - 1),
+            value=min(30, max(0, _n_frames - 1)),
+            key="t4_frame",
+        )
 
-        with st.container(border=True):
-            col_chk, col_desc = st.columns([1, 4])
-            with col_chk:
+        st.divider()
+        st.markdown("**Méthodes**")
+
+        current_cfg = pp_load_config(chosen_pp_model)
+        methods_def = METHODS_BY_MODEL.get(chosen_pp_model, [])
+        current_methods_by_name = {m["name"]: m for m in current_cfg.get("methods", [])}
+
+        new_methods = []
+        for method_def in methods_def:
+            mname = method_def["name"]
+            mlabel = method_def["label"]
+            mdesc = method_def["description"]
+            params_def = method_def["params"]
+
+            cur = current_methods_by_name.get(mname, {})
+            cur_enabled = cur.get("enabled", False)
+            cur_params = cur.get("params", {})
+
+            with st.container(border=True):
                 enabled = st.checkbox(
                     f"**{mlabel}**",
                     value=cur_enabled,
                     key=f"t4_{chosen_pp_model}_{mname}_en",
+                    help=mdesc,
                 )
-            with col_desc:
-                st.caption(mdesc)
-
-            new_params = {}
-            if params_def:
-                param_cols = st.columns(min(len(params_def), 4))
-                for i, (pname, pdef) in enumerate(params_def.items()):
-                    with param_cols[i % len(param_cols)]:
-                        cur_val = cur_params.get(pname, pdef["default"])
-                        if pdef["type"] == "int":
-                            new_params[pname] = st.number_input(
-                                pname,
-                                min_value=int(pdef["min"]),
-                                max_value=int(pdef["max"]),
-                                value=int(cur_val),
-                                step=int(pdef["step"]),
-                                key=f"t4_{chosen_pp_model}_{mname}_{pname}",
-                                disabled=not enabled,
-                            )
-                        else:
-                            new_params[pname] = st.number_input(
-                                pname,
-                                min_value=float(pdef["min"]),
-                                max_value=float(pdef["max"]),
-                                value=float(cur_val),
-                                step=float(pdef["step"]),
-                                format="%.2f",
-                                key=f"t4_{chosen_pp_model}_{mname}_{pname}",
-                                disabled=not enabled,
-                            )
-            else:
-                # Méthode sans paramètres (ex: hole_filling)
                 new_params = {}
+                for pname, pdef in params_def.items():
+                    cur_val = cur_params.get(pname, pdef["default"])
+                    if pdef["type"] == "int":
+                        new_params[pname] = st.slider(
+                            pname,
+                            min_value=int(pdef["min"]),
+                            max_value=int(pdef["max"]),
+                            value=int(cur_val),
+                            step=int(pdef["step"]),
+                            key=f"t4_{chosen_pp_model}_{mname}_{pname}",
+                            disabled=not enabled,
+                        )
+                    else:
+                        new_params[pname] = st.slider(
+                            pname,
+                            min_value=float(pdef["min"]),
+                            max_value=float(pdef["max"]),
+                            value=float(cur_val),
+                            step=float(pdef["step"]),
+                            key=f"t4_{chosen_pp_model}_{mname}_{pname}",
+                            disabled=not enabled,
+                            format="%.2f",
+                        )
+                new_methods.append({
+                    "name": mname,
+                    "enabled": enabled,
+                    "params": new_params,
+                })
 
-            new_methods.append({
-                "name": mname,
-                "enabled": enabled,
-                "params": new_params,
-            })
-
-    st.divider()
-    col_save, col_reset, _ = st.columns([1, 1, 3])
-
-    with col_save:
-        if st.button("💾 Sauvegarder", type="primary", key="t4_save"):
-            new_cfg = {
-                "model_key": chosen_pp_model,
-                "methods": new_methods,
-            }
-            pp_save_config(chosen_pp_model, new_cfg)
-            st.success(f"Config sauvegardée pour {_PP_MODEL_LABELS[chosen_pp_model]} !")
+        st.divider()
+        c1, c2 = st.columns(2)
+        if c1.button("💾 Sauvegarder", type="primary", key="t4_save", use_container_width=True):
+            pp_save_config(chosen_pp_model, {"model_key": chosen_pp_model, "methods": new_methods})
+            st.success("Config sauvegardée.")
+            st.rerun()
+        if c2.button("🔄 Réinitialiser", key="t4_reset", use_container_width=True):
+            pp_save_config(chosen_pp_model, pp_default_config(chosen_pp_model))
+            st.info("Config réinitialisée.")
             st.rerun()
 
-    with col_reset:
-        if st.button("🔄 Réinitialiser", key="t4_reset"):
-            default_cfg = pp_default_config(chosen_pp_model)
-            pp_save_config(chosen_pp_model, default_cfg)
-            st.info("Config réinitialisée (toutes les méthodes désactivées).")
-            st.rerun()
+    with col_prev:
+        st.subheader(f"🔍 Aperçu — frame {_frame_idx}")
 
-    st.divider()
-    st.subheader("📄 Config actuelle (JSON)")
-    # Recharger depuis le fichier pour afficher l'état sauvegardé
-    saved_cfg = pp_load_config(chosen_pp_model)
-    active_count = sum(1 for m in saved_cfg.get("methods", []) if m.get("enabled"))
-    if active_count > 0:
-        st.success(f"{active_count} méthode(s) active(s) pour {_PP_MODEL_LABELS[chosen_pp_model]}")
+        WINDOW = 8  # frames pour les méthodes temporelles (EMA)
+        try:
+            with st.spinner("Inférence…"):
+                frames, raw_masks = _t4_run_inference(chosen_pp_model, _video_path, _frame_idx, WINDOW)
+        except Exception as e:
+            st.error(f"Inférence échouée : {e}")
+            st.stop()
+
+        if not frames or not raw_masks:
+            st.error("Aucune frame récupérée.")
+            st.stop()
+
+        active_methods = [m for m in new_methods if m.get("enabled")]
+        pp_masks = _t4_apply_pp(frames, raw_masks, new_methods) if active_methods else raw_masks
+
+        frame = frames[-1]
+        raw_mask = raw_masks[-1]
+        pp_mask = pp_masks[-1]
+        gt_mask = _t4_get_gt_at(_gt_path, _frame_idx)
+
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        H, W = frame.shape[:2]
+
+        def _to_display(m):
+            if m.shape != (H, W):
+                m = cv2.resize(m, (W, H), interpolation=cv2.INTER_LINEAR)
+            return np.clip(m, 0, 1)
+
+        raw_disp = _to_display(raw_mask)
+        pp_disp = _to_display(pp_mask)
+        gt_disp = _to_display(gt_mask) if gt_mask is not None else None
+
+        r1c1, r1c2 = st.columns(2)
+        r1c1.image(frame_rgb, caption="Frame source", use_container_width=True)
+        if gt_disp is not None:
+            r1c2.image(gt_disp, caption="Ground truth", use_container_width=True, clamp=True)
+        else:
+            r1c2.info("Pas de ground truth pour cette frame.")
+
+        st.divider()
+        st.markdown("#### Masques")
+        r2c1, r2c2 = st.columns(2)
+        r2c1.image(raw_disp, caption="Avant post-process", use_container_width=True, clamp=True)
+        if active_methods:
+            r2c2.image(pp_disp, caption=f"Après ({len(active_methods)} méthode·s active·s)", use_container_width=True, clamp=True)
+        else:
+            r2c2.info("Activez une méthode pour voir l'effet.")
+
+        st.markdown("#### Overlay sur la frame")
+        r3c1, r3c2 = st.columns(2)
+        r3c1.image(_t4_overlay(frame, raw_disp), caption="Avant post-process", use_container_width=True)
+        if active_methods:
+            r3c2.image(_t4_overlay(frame, pp_disp), caption="Après post-process", use_container_width=True)
+
+        if active_methods:
+            with st.expander("📐 Différence (zones modifiées)", expanded=False):
+                diff = np.abs(pp_disp - raw_disp)
+                diff_norm = np.clip(diff * 5, 0, 1)
+                st.image(
+                    diff_norm,
+                    caption=f"|après - avant| × 5  (max diff = {float(diff.max()):.3f}, moyenne = {float(diff.mean()):.4f})",
+                    use_container_width=True,
+                    clamp=True,
+                )
+
+        with st.expander("📄 Config en cours (non sauvegardée)", expanded=False):
+            st.json({"model_key": chosen_pp_model, "methods": new_methods})
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  TAB 5 — Données enregistrées
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# ─── Descriptions de tous les modèles ────────────────────────────────────────
+_MODEL_INFO = {
+    "mediapipe_portrait": {
+        "display": "MediaPipe Portrait",
+        "icon": "🎭",
+        "desc": (
+            "Segmentation sémantique de portrait par Google MediaPipe (TFLite). "
+            "Optimisé pour les selfies et gros plans. Traitement **frame par frame** "
+            "sans mémoire temporelle : chaque image est traitée indépendamment. "
+            "Très faible latence grâce au modèle ultra-léger (~7.5M FLOPs, 256×256 px fixe)."
+        ),
+        "tech": ["TFLite", "GPU auto-sélectionné", "256×256 px"],
+    },
+    "mobilenetv3_lraspp": {
+        "display": "MobileNetV3 + LRASPP",
+        "icon": "📱",
+        "desc": (
+            "Segmentation sémantique COCO via **PyTorch**. Extrait la classe *personne* "
+            "(index 15 COCO/VOC) grâce à un encodeur MobileNetV3-Large + décodeur "
+            "LRASPP léger. Supporte le **batching GPU natif** pour accélérer le traitement "
+            "multi-frames. Normalisation ImageNet appliquée en entrée."
+        ),
+        "tech": ["PyTorch", "CUDA / MPS / CPU", "256×256 px", "~70M FLOPs"],
+    },
+    "rvm": {
+        "display": "RVM (Robust Video Matting)",
+        "icon": "🎬",
+        "desc": (
+            "Réseau récurrent **GRU** (Gated Recurrent Unit) conçu pour la cohérence "
+            "temporelle en vidéo. Produit un **alpha matte** continu [0–1]. Maintient "
+            "un état caché entre frames pour éviter le flickering naturellement. "
+            "ONNX Runtime avec accélération **CoreML** sur Mac. Résolution dynamique."
+        ),
+        "tech": ["ONNX Runtime", "CoreML / CUDA / CPU", "Résolution dynamique", "~600M FLOPs"],
+    },
+    "mediapipe_selfie_multiclass": {
+        "display": "MediaPipe Selfie Multiclass",
+        "icon": "👤",
+        "desc": (
+            "Variante **multiclasse** de MediaPipe Selfie : différencie corps, visage, "
+            "cheveux et arrière-plan en une seule passe. TFLite, optimisé pour les selfies."
+        ),
+        "tech": ["TFLite", "GPU auto-sélectionné", "Multiclasse"],
+    },
+    "mediapipe_landscape": {
+        "display": "MediaPipe Landscape",
+        "icon": "🌄",
+        "desc": (
+            "Variante **grand angle** de MediaPipe : optimisée pour les caméras de bureau "
+            "et les personnes éloignées. Modèle paysage dédié, moins précis sur les "
+            "gros plans mais meilleur sur les scènes larges."
+        ),
+        "tech": ["TFLite", "Résolution paysage"],
+    },
+    "modnet": {
+        "display": "MODNet",
+        "icon": "✂️",
+        "desc": (
+            "Matting en **temps réel sans trimap**. Décompose le problème en sémantique "
+            "+ détail + fusion pour un détourage net des cheveux et contours fins. "
+            "Disponible en PyTorch ou ONNX. Spécialisé portraits naturels."
+        ),
+        "tech": ["PyTorch / ONNX", "Portraits et scènes naturelles"],
+    },
+    "pphumanseg_v2": {
+        "display": "PP-HumanSeg V2",
+        "icon": "🧍",
+        "desc": (
+            "Modèle de segmentation humaine de **PaddlePaddle**, exporté en ONNX. "
+            "Raffinage des contours intégré. Bon équilibre précision/vitesse pour "
+            "la segmentation du corps entier, y compris en plan large."
+        ),
+        "tech": ["ONNX Runtime", "Corps entier"],
+    },
+    "efficient_vit": {
+        "display": "EfficientViT",
+        "icon": "⚡",
+        "desc": (
+            "Vision Transformer efficace pour la segmentation sémantique. Réduit la "
+            "complexité des **attention layers** par des approximations linéaires, "
+            "restant rapide tout en capturant le contexte global de l'image."
+        ),
+        "tech": ["PyTorch", "ViT léger"],
+    },
+    "trimap_matting": {
+        "display": "Trimap Matting V3",
+        "icon": "🎨",
+        "desc": (
+            "Pipeline hybride : estimation de **pose** → GrabCut avec trimap automatique "
+            "→ filtre guidé pour les détails fins → EMA temporel pour la stabilité. "
+            "Le plus précis sur les zones semi-transparentes (cheveux, flou) mais aussi "
+            "le plus lent. Idéal pour les plans fixes ou les scènes avec fond simple."
+        ),
+        "tech": ["OpenCV GrabCut", "Filtre guidé", "EMA temporel", "Trimap auto"],
+    },
+}
+
+with tab5:
+    st.title("🗄️ Données enregistrées")
+    st.markdown(
+        "Consultez toutes les données de benchmark stockées sur cet ordinateur. "
+        "Téléchargez les résultats CSV, les vidéos de masques et accédez aux détails "
+        "de chaque modèle et version post-processée."
+    )
+
+    # ── Section 1 : Résultats CSV globaux ────────────────────────────────────
+    st.subheader("📊 Résultats globaux")
+    _csv_path = OUTPUT_DIR / "benchmark_results.csv"
+    _json_path = OUTPUT_DIR / "benchmark_results.json"
+
+    if _csv_path.exists():
+        _df_global = pd.read_csv(_csv_path)
+        st.dataframe(_df_global, use_container_width=True)
+        _dl1, _dl2, _ = st.columns([1, 1, 3])
+        with _dl1:
+            st.download_button(
+                "📥 Télécharger CSV",
+                data=_csv_path.read_bytes(),
+                file_name="benchmark_results.csv",
+                mime="text/csv",
+                key="t5_dl_csv",
+            )
+        with _dl2:
+            if _json_path.exists():
+                st.download_button(
+                    "📥 Télécharger JSON",
+                    data=_json_path.read_bytes(),
+                    file_name="benchmark_results.json",
+                    mime="application/json",
+                    key="t5_dl_json",
+                )
     else:
-        st.info("Aucune méthode active — post-processing désactivé pour ce modèle.")
-    st.json(saved_cfg)
+        st.info("Aucun résultat CSV trouvé — lancez d'abord un benchmark.")
+
+    st.divider()
+
+    # ── Section 2 : Données par modèle ───────────────────────────────────────
+    st.subheader("🤖 Données par modèle")
+
+    _masks_root5 = OUTPUT_DIR / "masks"
+
+    if not _masks_root5.is_dir():
+        st.warning("Aucun dossier de masques trouvé.")
+    else:
+        for _m_dir in sorted(_masks_root5.iterdir()):
+            if not _m_dir.is_dir():
+                continue
+            _m_display = _m_dir.name.replace("_", " ")
+
+            # Trouver la clé du registry pour ce modèle
+            _m_key = None
+            for k, info in _MODEL_INFO.items():
+                if info["display"].replace(" ", "_") == _m_dir.name or \
+                   info["display"] == _m_display:
+                    _m_key = k
+                    break
+
+            _info = _MODEL_INFO.get(_m_key, {}) if _m_key else {}
+
+            with st.expander(
+                f"{_info.get('icon', '🔹')} **{_m_display}**",
+                expanded=False,
+            ):
+                # ── Bandeau descriptif du modèle ──────────────────────────────
+                if _info:
+                    st.info(
+                        f"**{_info['display']}**  \n"
+                        + _info["desc"]
+                        + "\n\n🔧 **Stack** : " + " · ".join(_info.get("tech", []))
+                    )
+
+                # ── Métriques depuis CSV ───────────────────────────────────────
+                if _csv_path.exists():
+                    _df_m = _df_global[_df_global["model"] == _m_display] if "model" in _df_global.columns else pd.DataFrame()
+                    if not _df_m.empty:
+                        st.markdown("**Métriques agrégées**")
+                        _num_cols = [c for c in ["iou_mean", "boundary_f_mean", "flow_warping_error", "latency_p95_ms"] if c in _df_m.columns]
+                        if _num_cols:
+                            _agg = _df_m[_num_cols].mean(numeric_only=True)
+                            _mcols = st.columns(len(_num_cols))
+                            _labels = {
+                                "iou_mean": "IoU moyen",
+                                "boundary_f_mean": "Boundary F",
+                                "flow_warping_error": "FWE",
+                                "latency_p95_ms": "Latence p95 (ms)",
+                            }
+                            for ci, col_name in enumerate(_num_cols):
+                                _mcols[ci].metric(_labels.get(col_name, col_name), f"{_agg[col_name]:.4f}")
+
+                # ── Runs numérotés ─────────────────────────────────────────────
+                _run_dirs5 = sorted(d for d in _m_dir.iterdir() if d.is_dir() and d.name.startswith("run_"))
+                _flat_masks = list(_m_dir.glob("*_mask.mp4")) + list(_m_dir.glob("*_segmented.mp4"))
+
+                if _run_dirs5:
+                    st.markdown(f"**{len(_run_dirs5)} run(s) enregistré(s)**")
+                    for _rd in _run_dirs5:
+                        _rd_label = _rd.name
+
+                        # Lire run_config.json (ou legacy postprocess_config.json)
+                        _rc5_path = _rd / "run_config.json"
+                        _legacy5_path = _rd / "postprocess_config.json"
+                        _rc5: dict = {}
+                        if _rc5_path.exists():
+                            try:
+                                _rc5 = json.loads(_rc5_path.read_text())
+                            except Exception:
+                                pass
+                        elif _legacy5_path.exists():
+                            try:
+                                _rc5 = {"postprocess_config": json.loads(_legacy5_path.read_text())}
+                            except Exception:
+                                pass
+
+                        _pp5 = _rc5.get("postprocess_config") or {}
+                        _active5 = [f"`{m['name']}`" for m in _pp5.get("methods", []) if m.get("enabled")]
+                        _settings5 = _rc5.get("settings", {})
+                        _summ5 = _rc5.get("results_summary", {})
+                        _run_mp4s = sorted(_rd.glob("*_mask.mp4"))
+                        _run_segs = sorted(_rd.glob("*_segmented.mp4"))
+                        _run_csv5 = _rd / "results.csv"
+                        _run_cfg5 = _rc5_path if _rc5_path.exists() else (_legacy5_path if _legacy5_path.exists() else None)
+
+                        with st.container(border=True):
+                            _r1, _r2 = st.columns([3, 1])
+                            with _r1:
+                                # En-tête du run
+                                _ts = _rc5.get("timestamp", "")[:16].replace("T", " ")
+                                st.markdown(f"📁 **{_rd_label}** — {_ts or 'date inconnue'}")
+
+                                # Post-process
+                                st.markdown("🔧 Post-process : " + (" · ".join(_active5) if _active5 else "aucun"))
+
+                                # Settings
+                                if _settings5:
+                                    _sflags = [k.replace("_", " ") for k, v in _settings5.items() if v]
+                                    if _sflags:
+                                        st.caption("⚙️ " + " · ".join(_sflags))
+
+                                # Résumé des résultats
+                                if _summ5:
+                                    _sm_cols = st.columns(4)
+                                    for _ci, (_sk, _sl) in enumerate([
+                                        ("iou_mean", "IoU"), ("boundary_f_mean", "BF"),
+                                        ("flow_warping_error", "FWE"), ("latency_p95_ms", "Lat. p95"),
+                                    ]):
+                                        _v = _summ5.get(_sk)
+                                        _sm_cols[_ci].metric(_sl, f"{_v:.4f}" if _v is not None else "—")
+
+                                # Nombre de vidéos
+                                _total_vids = len(_run_mp4s) + len(_run_segs)
+                                st.caption(f"{_total_vids} vidéo(s) · {len(list(_rd.iterdir()))} fichier(s)")
+
+                            with _r2:
+                                # Téléchargement CSV par run
+                                if _run_csv5.exists():
+                                    st.download_button(
+                                        "📥 CSV",
+                                        data=_run_csv5.read_bytes(),
+                                        file_name=f"{_m_dir.name}_{_rd_label}_results.csv",
+                                        mime="text/csv",
+                                        key=f"t5_csv_{_m_dir.name}_{_rd.name}",
+                                    )
+                                # Téléchargement config
+                                if _run_cfg5:
+                                    st.download_button(
+                                        "📥 Config",
+                                        data=_run_cfg5.read_bytes(),
+                                        file_name=f"{_m_dir.name}_{_rd_label}_config.json",
+                                        mime="application/json",
+                                        key=f"t5_cfg_{_m_dir.name}_{_rd.name}",
+                                    )
+                                # Téléchargement ZIP (vidéos + config + CSV)
+                                if _run_mp4s or _run_segs:
+                                    _zip_buf = io.BytesIO()
+                                    with zipfile.ZipFile(_zip_buf, "w", zipfile.ZIP_DEFLATED) as _zf:
+                                        for _f in list(_run_mp4s) + list(_run_segs):
+                                            _zf.write(_f, _f.name)
+                                        if _run_cfg5:
+                                            _zf.write(_run_cfg5, _run_cfg5.name)
+                                        if _run_csv5.exists():
+                                            _zf.write(_run_csv5, "results.csv")
+                                    _zip_buf.seek(0)
+                                    st.download_button(
+                                        f"📦 ZIP",
+                                        data=_zip_buf.read(),
+                                        file_name=f"{_m_dir.name}_{_rd_label}.zip",
+                                        mime="application/zip",
+                                        key=f"t5_zip_{_m_dir.name}_{_rd.name}",
+                                    )
+
+                            # Aperçu vidéos
+                            if _run_mp4s:
+                                with st.expander(f"🎬 Vidéos masques ({len(_run_mp4s)})"):
+                                    for _vf in _run_mp4s[:6]:
+                                        st.caption(_vf.name)
+                                        st.video(open(_vf, "rb"))
+                            if _run_segs:
+                                with st.expander(f"🎨 Vidéos détourées ({len(_run_segs)})"):
+                                    for _vf in _run_segs[:4]:
+                                        st.caption(_vf.name)
+                                        st.video(open(_vf, "rb"))
+
+                elif _flat_masks:
+                    # Structure plate (ancien format ou modèles non supportés)
+                    st.markdown(f"**{len(_flat_masks)} fichier(s) vidéo (structure plate)**")
+                    _dl_flat, _ = st.columns([1, 2])
+                    with _dl_flat:
+                        _zip_flat = io.BytesIO()
+                        with zipfile.ZipFile(_zip_flat, "w", zipfile.ZIP_DEFLATED) as _zf:
+                            for _f in _flat_masks:
+                                _zf.write(_f, _f.name)
+                        _zip_flat.seek(0)
+                        st.download_button(
+                            "📦 Télécharger toutes les vidéos",
+                            data=_zip_flat.read(),
+                            file_name=f"{_m_dir.name}_videos.zip",
+                            mime="application/zip",
+                            key=f"t5_zip_flat_{_m_dir.name}",
+                        )
+                    with st.expander(f"🎬 Vidéos ({len(_flat_masks)})"):
+                        for _vf in _flat_masks[:6]:
+                            st.caption(_vf.name)
+                            st.video(open(_vf, "rb"))
+                else:
+                    st.info("Aucune vidéo enregistrée pour ce modèle.")

@@ -1,9 +1,9 @@
 {
-  "model_key": "mobilenetv3_lraspp",
+  "model_key": "mediapipe_portrait",
   "methods": [
     {
       "name": "gaussian_blur",
-      "enabled": true,
+      "enabled": false,
       "params": {
         "ksize": 5,
         "sigma": 1.0
@@ -11,41 +11,44 @@
     },
     {
       "name": "morphological_close",
-      "enabled": true,
+      "enabled": false,
       "params": {
-        "ksize": 7
+        "ksize": 5
       }
     },
     {
       "name": "morphological_open",
-      "enabled": true,
+      "enabled": false,
       "params": {
         "ksize": 3
       }
     },
     {
-      "name": "guided_filter",
-      "enabled": true,
+      "name": "bilateral_filter",
+      "enabled": false,
       "params": {
-        "radius": 4,
-        "eps": 0.05
+        "d": 9,
+        "sigma_color": 50,
+        "sigma_space": 50
       }
     },
     {
-      "name": "largest_components",
-      "enabled": true,
+      "name": "temporal_ema",
+      "enabled": false,
       "params": {
-        "n": 1
+        "alpha": 0.7
       }
     },
     {
-      "name": "hole_filling",
-      "enabled": true,
-      "params": {}
+      "name": "feathering",
+      "enabled": false,
+      "params": {
+        "ksize": 11
+      }
     },
     {
       "name": "binarize",
-      "enabled": true,
+      "enabled": false,
       "params": {
         "threshold": 0.5
       }

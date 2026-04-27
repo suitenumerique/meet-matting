@@ -18,8 +18,12 @@ import shutil
 import threading
 import time
 import warnings
+<<<<<<< HEAD
 from collections.abc import Callable, Generator
 from concurrent.futures import ThreadPoolExecutor
+=======
+from datetime import datetime
+>>>>>>> 674b3ef (post-processing visuel)
 from pathlib import Path
 from typing import Any
 
@@ -759,10 +763,12 @@ def run_benchmark(
     # Préparer les répertoires
     output_dir.mkdir(parents=True, exist_ok=True)
     temp_dir.mkdir(parents=True, exist_ok=True)
+<<<<<<< HEAD
 
+=======
+>>>>>>> 674b3ef (post-processing visuel)
     masks_final_dir = output_dir / "masks"
-    if save_masks:
-        masks_final_dir.mkdir(parents=True, exist_ok=True)
+    masks_final_dir.mkdir(parents=True, exist_ok=True)
 
     # Découvrir les datasets
     datasets = discover_datasets(videos_dir, gt_dir)
@@ -832,22 +838,35 @@ def run_benchmark(
             else:
                 _post_processor = None
 
-        # ── Répertoire de run numéroté (modèles supportés uniquement) ──
-        _run_dir: Optional[Path] = None
-        _use_run_dir = (model_key in _PP_SUPPORTED_MODELS) if model_key else False
-        if _use_run_dir and (save_masks or save_video or save_segmented):
-            _model_output_dir = masks_final_dir / model_dir_name
-            _model_output_dir.mkdir(parents=True, exist_ok=True)
-            _existing_runs = sorted(_model_output_dir.glob("run_*"))
-            _run_n = len(_existing_runs) + 1
-            _run_dir = _model_output_dir / f"run_{_run_n:03d}"
-            _run_dir.mkdir(parents=True, exist_ok=True)
-            # Sauvegarde de la config post-process dans le dossier de run
-            _config_to_save = _pp_config if _pp_config else {"model_key": model_key, "methods": []}
-            (_run_dir / "postprocess_config.json").write_text(
-                json.dumps(_config_to_save, indent=2, ensure_ascii=False), encoding="utf-8"
-            )
-            logger.info("Dossier run créé : %s", _run_dir)
+        # ── Répertoire de run numéroté (tous les modèles) ──
+        _model_output_dir = masks_final_dir / model_dir_name
+        _model_output_dir.mkdir(parents=True, exist_ok=True)
+        _existing_runs = sorted(_model_output_dir.glob("run_*"))
+        _run_n = len(_existing_runs) + 1
+        _run_dir = _model_output_dir / f"run_{_run_n:03d}"
+        _run_dir.mkdir(parents=True, exist_ok=True)
+
+        # Sauvegarde initiale du run_config.json
+        _run_config: Dict = {
+            "run_id": _run_n,
+            "timestamp": datetime.now().isoformat(),
+            "model": model.name,
+            "model_key": model_key or "",
+            "settings": {
+                "save_masks": save_masks,
+                "save_video": save_video,
+                "save_segmented": save_segmented,
+                "analyze_thresholds": analyze_thresholds,
+            },
+            "postprocess_config": _pp_config,
+        }
+        (_run_dir / "run_config.json").write_text(
+            json.dumps(_run_config, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        logger.info("Dossier run créé : %s", _run_dir)
+
+        # Résultats de ce modèle (pour le CSV par run)
+        _model_results: List[Dict] = []
 
         # Charger le modèle
         try:
@@ -959,13 +978,8 @@ def run_benchmark(
 
                 # ── Sauvegarde permanente si demandée ──
                 if save_masks or save_video or save_segmented:
-                    # Modèles supportés → sous-dossier run numéroté ; sinon comportement classique
-                    if _run_dir is not None:
-                        out_base_dir = _run_dir
-                        dest_base = _run_dir / video_path.stem
-                    else:
-                        out_base_dir = masks_final_dir / model_dir_name
-                        dest_base = out_base_dir / video_path.stem
+                    out_base_dir = _run_dir
+                    dest_base = _run_dir / video_path.stem
                     dest_base.mkdir(parents=True, exist_ok=True)
 
 
@@ -1007,16 +1021,44 @@ def run_benchmark(
                 result_entry["error"] = str(e)
 
             all_results.append(result_entry)
+<<<<<<< HEAD
+=======
+            _model_results.append(result_entry)
+>>>>>>> 674b3ef (post-processing visuel)
 
             # Mise à jour progression
             current_combo += 1
             if progress_callback:
+<<<<<<< HEAD
                 progress_callback(
                     current_combo, total_combos, f"Traité : {model.name} / {video_path.name}"
                 )
+=======
+                progress_callback(current_combo, total_combos, f"Traité : {model.name} / {video_path.name}")
+>>>>>>> 674b3ef (post-processing visuel)
 
             if on_result:
                 on_result(result_entry)
+
+        # ── Finalisation par modèle : CSV + mise à jour run_config ──
+        if _model_results:
+            _save_csv_report(_model_results, _run_dir, filename="results.csv")
+            _ok = [r for r in _model_results if r.get("status") == "OK"]
+            def _safe_mean(key):
+                vals = [r.get(key) for r in _ok if r.get(key) is not None]
+                return round(sum(vals) / len(vals), 4) if vals else None
+            _run_config["results_summary"] = {
+                "total_videos": len(_model_results),
+                "successful": len(_ok),
+                "iou_mean": _safe_mean("iou_mean"),
+                "boundary_f_mean": _safe_mean("boundary_f_mean"),
+                "flow_warping_error": _safe_mean("flow_warping_error"),
+                "latency_p95_ms": _safe_mean("latency_p95_ms"),
+            }
+            (_run_dir / "run_config.json").write_text(
+                json.dumps(_run_config, indent=2, ensure_ascii=False), encoding="utf-8"
+            )
+            logger.info("📄 CSV par run sauvegardé : %s", _run_dir / "results.csv")
 
         # Libérer le modèle
         model.cleanup()
@@ -1282,7 +1324,11 @@ def compute_metrics_on_output(
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Report generation
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+<<<<<<< HEAD
 def _save_csv_report(results: list[dict], output_dir: Path) -> None:
+=======
+def _save_csv_report(results: List[Dict], output_dir: Path, filename: str = None) -> None:
+>>>>>>> 674b3ef (post-processing visuel)
     """Sauvegarde les résultats en CSV.
 
     Si un résultat contient threshold_analysis (benchmark lancé avec
@@ -1292,7 +1338,7 @@ def _save_csv_report(results: list[dict], output_dir: Path) -> None:
     if not results:
         return
 
-    csv_path = output_dir / RESULTS_CSV_FILENAME
+    csv_path = output_dir / (filename or RESULTS_CSV_FILENAME)
     fieldnames = [
         "model",
         "video",
