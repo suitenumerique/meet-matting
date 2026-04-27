@@ -33,8 +33,27 @@ env/
 venv/
 .pytest_cache/
 
+# Tooling caches
+.mypy_cache/
+.ruff_cache/
+.dmypy.json
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+build/
+dist/
+*.egg-info/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
 # macOS
 .DS_Store
 
 # Claude Code
 CLAUDE.md
+.claude/
