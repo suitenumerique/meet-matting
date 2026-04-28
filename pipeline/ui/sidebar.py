@@ -32,6 +32,7 @@ def render_sidebar() -> SidebarSelection:
     """
     # --- 1. Video ---
     with st.sidebar.expander("Video", expanded=True):
+        st.caption("Pick the source video to process.")
         videos = list_videos(VIDEO_DIR)
         if videos:
             chosen = st.selectbox(
@@ -47,6 +48,7 @@ def render_sidebar() -> SidebarSelection:
 
     # --- 2. Model ---
     with st.sidebar.expander("Model", expanded=True):
+        st.caption("The segmentation model that produces the alpha matte.")
         model_names = models.names()
         model_name = st.selectbox("Model", model_names, key="model_select")
         model_cls = models.get(model_name)
@@ -64,6 +66,9 @@ def render_sidebar() -> SidebarSelection:
 
     # --- 3. Preprocessors ---
     with st.sidebar.expander("Preprocessors", expanded=False):
+        st.caption(
+            "Transforms applied to each frame *before* the model sees it. Does not affect the final composite."
+        )
         pre_names = preprocessors.names()
         chosen_pre = st.multiselect(
             "Preprocessing steps (applied in order)",
@@ -80,6 +85,7 @@ def render_sidebar() -> SidebarSelection:
 
     # --- 4. Postprocessors ---
     with st.sidebar.expander("Postprocessors", expanded=False):
+        st.caption("Refinements applied to the raw mask *after* the model, before compositing.")
         post_names = postprocessors.names()
         chosen_post = st.multiselect(
             "Postprocessing steps (applied in order)",
