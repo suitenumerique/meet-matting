@@ -69,11 +69,4 @@ class PersonZoom(Preprocessor):
         # Store in shared context for the pipeline/model to use
         context.set_val("person_bboxes", self.last_bboxes)
 
-        # Draw debug boxes on the frame returned (debug_frame)
-        debug_frame = frame.copy()
-        for (x1, y1, x2, y2) in self.last_bboxes:
-            cv2.rectangle(debug_frame, (x1, y1), (x2, y2), (255, 255, 255), 2)
-            cv2.putText(debug_frame, "ZOOM ZONE", (x1, y1-10), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-
-        return debug_frame
+        return frame

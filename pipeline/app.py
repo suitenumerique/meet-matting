@@ -134,28 +134,32 @@ with st.expander("Browse saved outputs", expanded=False):
             reverse=True,
         )
         run_names = [r.name for r in runs]
-        selected_run = st.selectbox("Run", run_names, key="browse_run")
-        run_dir = OUTPUT_DIR / selected_run
+        if not run_names:
+            st.info("No saved runs found.")
+        else:
+            selected_run = st.selectbox("Run", run_names, key="browse_run")
+            if selected_run:
+                run_dir = OUTPUT_DIR / selected_run
 
-        # Show config for this run
-        config_file = run_dir / "config.json"
-        if config_file.exists():
-            with open(config_file, "r") as f:
-                conf = json.load(f)
-            st.json(conf)
+                # Show config for this run
+                config_file = run_dir / "config.json"
+                if config_file.exists():
+                    with open(config_file, "r") as f:
+                        conf = json.load(f)
+                    st.json(conf)
 
-        col_m, col_c = st.columns(2)
-        with col_m:
-            mask_file = run_dir / "mask.mp4"
-            if mask_file.exists():
-                st.caption("Mask — alpha matte (white = foreground)")
-                st.video(mask_file.read_bytes())
-            else:
-                st.info("mask.mp4 not found.")
-        with col_c:
-            comp_file = run_dir / "composite.mp4"
-            if comp_file.exists():
-                st.caption("Composite — subject on black background")
-                st.video(comp_file.read_bytes())
-            else:
-                st.info("composite.mp4 not found.")
+                col_m, col_c = st.columns(2)
+                with col_m:
+                    mask_file = run_dir / "mask.mp4"
+                    if mask_file.exists():
+                        st.caption("Mask — alpha matte (white = foreground)")
+                        st.video(mask_file.read_bytes())
+                    else:
+                        st.info("mask.mp4 not found.")
+                with col_c:
+                    comp_file = run_dir / "composite.mp4"
+                    if comp_file.exists():
+                        st.caption("Composite — subject on black background")
+                        st.video(comp_file.read_bytes())
+                    else:
+                        st.info("composite.mp4 not found.")

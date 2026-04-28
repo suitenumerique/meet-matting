@@ -35,11 +35,10 @@ class MattingPipeline:
         
         original = frame.copy()
         inference_frame = frame.copy()
-        debug_frame = frame.copy()
 
-        # 1. Preprocessing (populates context with bboxes, etc.)
+        # 1. Preprocessing
         for pre in self.preprocessors:
-            debug_frame = pre(debug_frame)
+            inference_frame = pre(inference_frame)
 
         # 2. Model Inference (with automatic Person Zoom support)
         bboxes = context.get_val("person_bboxes", [])
@@ -91,6 +90,20 @@ class MattingPipeline:
         
         comp_mask = final_mask[:, :, np.newaxis]
         final = (original * comp_mask).astype(np.uint8)
+
+        # 5. Prepare debug view for UI (preprocessed frame + overlays)
+        debug_frame = inference_frame.copy()
+        for (x1, y1, x2, y2) in bboxes:
+            cv2.rectangle(debug_frame, (x1, y1), (x2, y2), (255, 255, 255), 2)
+            cv2.putText(
+                debug_frame,
+                "ZOOM ZONE",
+                (x1, y1 - 10),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (255, 255, 255),
+                1,
+            )
 
         return {
             "original": original,

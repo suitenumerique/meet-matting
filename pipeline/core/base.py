@@ -34,6 +34,10 @@ class Component(ABC):
     def parameter_specs(cls) -> list[ParameterSpec]:
         """Return the list of ParameterSpec objects that describe this component's parameters."""
 
+    def reset(self):
+        """Reset state of the component. Default implementation does nothing."""
+        pass
+
 
 class Preprocessor(Component, ABC):
     """Transforms a frame before it is passed to the matting model.
