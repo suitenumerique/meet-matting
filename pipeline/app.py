@@ -3,7 +3,7 @@ from datetime import datetime
 import streamlit as st
 from config import OUTPUT_DIR
 from core.pipeline import MattingPipeline
-from core.registry import models, postprocessors, preprocessors
+from core.registry import models, postprocessors, preprocessors, upsamplers
 from core.video_io import frame_count, read_frame
 from core.video_processing import process_video
 from ui.sidebar import render_sidebar
@@ -13,6 +13,7 @@ from ui.video_panel import display_four_panels
 preprocessors.discover("preprocessing")
 models.discover("models")
 postprocessors.discover("postprocessing")
+upsamplers.discover("upsampling")
 
 st.set_page_config(layout="wide", page_title="Matting Pipeline Lab")
 st.title("Background matting pipeline")
@@ -30,6 +31,7 @@ if selection.video_path is None:
 # Build pipeline from selection.
 pre_components = [preprocessors.get(name)(**params) for name, params in selection.preprocessors]
 model = models.get(selection.model_name)(**selection.model_params)
+model.upsampler = upsamplers.get(selection.upsampler[0])(**selection.upsampler[1])
 model.load(selection.weights_path)  # may be None
 post_components = [postprocessors.get(name)(**params) for name, params in selection.postprocessors]
 pipeline = MattingPipeline(pre_components, model, post_components)

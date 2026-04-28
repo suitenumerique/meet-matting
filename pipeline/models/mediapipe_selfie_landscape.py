@@ -23,6 +23,7 @@ class MediapipeSelfielandscape(MattingModel):
     _segmenter = None
     _mp = None
     _frame_count: int = 0
+    upsampler = None
 
     @classmethod
     def parameter_specs(cls):
@@ -93,7 +94,12 @@ class MediapipeSelfielandscape(MattingModel):
         else:
             return np.zeros((h, w), dtype=np.float32)
 
-        if mask_small.shape[:2] != (h, w):
-            mask_small = cv2.resize(mask_small, (w, h), interpolation=cv2.INTER_LINEAR)
+        mask_small = mask_small.squeeze()
 
-        return mask_small.astype(np.float32)
+        if mask_small.shape[:2] == (h, w):
+            return mask_small.astype(np.float32)
+
+        if self.upsampler is not None:
+            return self.upsampler.upsample(mask_small.astype(np.float32), frame)
+
+        return cv2.resize(mask_small, (w, h), interpolation=cv2.INTER_LINEAR).astype(np.float32)

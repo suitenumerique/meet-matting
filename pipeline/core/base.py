@@ -108,3 +108,28 @@ class Postprocessor(Component, ABC):
         Returns:
             Refined alpha matte, shape (H, W), dtype float32, range [0, 1].
         """
+
+
+class UpsamplingMethod(Component, ABC):
+    """Upsamples a low-resolution mask to the resolution of a high-resolution guide image.
+
+    Data contract:
+        upsample receives:
+            low_res_mask: np.ndarray, shape (H_l, W_l), dtype float32, range [0, 1].
+            guide:        np.ndarray, shape (H_h, W_h, 3), dtype uint8, RGB.
+        upsample returns:
+            np.ndarray, shape (H_h, W_h), dtype float32, range [0, 1].
+    """
+
+    @abstractmethod
+    def upsample(self, low_res_mask: np.ndarray, guide: np.ndarray) -> np.ndarray:
+        """Upsample *low_res_mask* to the resolution of *guide*.
+
+        Args:
+            low_res_mask: Alpha matte, shape (H_l, W_l), dtype float32, range [0, 1].
+            guide:        Full-resolution RGB frame used as upsampling guidance,
+                          shape (H_h, W_h, 3), dtype uint8.
+
+        Returns:
+            Upsampled alpha matte, shape (H_h, W_h), dtype float32, range [0, 1].
+        """

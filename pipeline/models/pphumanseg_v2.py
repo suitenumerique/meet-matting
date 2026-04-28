@@ -28,6 +28,7 @@ class PPHumanSegV2(MattingModel):
 
     _session = None
     _input_name: str | None = None
+    upsampler = None
 
     @classmethod
     def parameter_specs(cls):
@@ -138,9 +139,12 @@ class PPHumanSegV2(MattingModel):
         else:
             mask_padded = logits.squeeze()
 
-        # Remove letterbox padding
-        mask_low = mask_padded[dy : dy + nh, dx : dx + nw]
-        mask_up = cv2.resize(mask_low, (w, h), interpolation=cv2.INTER_LINEAR)
+        # Remove letterbox padding, then upsample to original resolution
+        mask_low = mask_padded[dy : dy + nh, dx : dx + nw].astype(np.float32)
+        if self.upsampler is not None:
+            mask_up = self.upsampler.upsample(mask_low, frame)
+        else:
+            mask_up = cv2.resize(mask_low, (w, h), interpolation=cv2.INTER_LINEAR)
 
         if self.params["use_refinement"]:
             # frame is RGB but guidedFilter only needs luminance structure — BGR order doesn't matter
