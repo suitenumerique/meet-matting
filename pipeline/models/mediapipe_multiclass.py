@@ -101,7 +101,8 @@ class MediapipeSelfieMulticlass(MattingModel):
         options = vision.ImageSegmenterOptions(
             base_options=base_options,
             running_mode=vision.RunningMode.IMAGE,
-            output_category_mask=True,
+            output_category_mask=False,
+            output_confidence_masks=True,
         )
         self._segmenter = vision.ImageSegmenter.create_from_options(options)
         logger.info(f"Loaded MediaPipe Multiclass from {path} (Delegate: {delegate.name})")
@@ -117,22 +118,29 @@ class MediapipeSelfieMulticlass(MattingModel):
         
         result = self._segmenter.segment(mp_image)
         
-        # Category mask values:
+        # Build list of allowed indices
         # 0: bg, 1: hair, 2: body-skin, 3: face-skin, 4: clothes, 5: others
-        mask = result.category_mask.numpy_view()
+        allowed_indices = []
+        if self.params.get("include_hair", True): allowed_indices.append(1)
+        if self.params.get("include_body_skin", True): allowed_indices.append(2)
+        if self.params.get("include_face_skin", True): allowed_indices.append(3)
+        if self.params.get("include_clothes", True): allowed_indices.append(4)
+        if self.params.get("include_others", True): allowed_indices.append(5)
         
-        # Build set of allowed classes
-        allowed = []
-        if self.params.get("include_hair", True): allowed.append(1)
-        if self.params.get("include_body_skin", True): allowed.append(2)
-        if self.params.get("include_face_skin", True): allowed.append(3)
-        if self.params.get("include_clothes", True): allowed.append(4)
-        if self.params.get("include_others", True): allowed.append(5)
-        
-        # Merge selected categories into a person mask
-        if not allowed:
-            person_mask = np.zeros_like(mask, dtype=np.float32)
-        else:
-            person_mask = np.isin(mask, allowed).astype(np.float32)
+        h, w = frame_rgb.shape[:2]
+        if not allowed_indices or not result.confidence_masks:
+            return np.zeros((h, w), dtype=np.float32)
+            
+        # Sum confidence masks of all selected categories
+        person_mask = np.zeros((h, w), dtype=np.float32)
+        for idx in allowed_indices:
+            # Add the probability of this class (squeeze to remove trailing 1 if present)
+            mask_data = result.confidence_masks[idx].numpy_view()
+            if mask_data.ndim == 3:
+                mask_data = mask_data.squeeze(-1)
+            person_mask += mask_data
+            
+        # Clip to [0, 1] to avoid values > 1 at boundaries (though they should sum to 1 theoretically)
+        person_mask = np.clip(person_mask, 0, 1)
         
         return person_mask

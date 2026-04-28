@@ -14,6 +14,7 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 _DETECTOR_URL = "https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite0/float16/latest/efficientdet_lite0.tflite"
+_POSE_MODEL_URL = "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/latest/pose_landmarker_lite.task"
 
 class PersonDetector:
     def __init__(self, score_threshold: float = 0.25):
@@ -72,4 +73,74 @@ class PersonDetector:
             
             bboxes.append((int(x1), int(y1), int(x2), int(y2)))
         
+        return bboxes
+
+
+class PoseDetector:
+    """Uses MediaPipe Pose to find person bounding boxes based on keypoints."""
+    def __init__(self, min_pose_presence_confidence: float = 0.5):
+        self._landmarker = None
+        self._conf = min_pose_presence_confidence
+
+    def load(self):
+        try:
+            import mediapipe as mp
+            from mediapipe.tasks.python import BaseOptions
+            from mediapipe.tasks.python.vision import PoseLandmarker, PoseLandmarkerOptions, RunningMode
+        except ImportError as e:
+            raise ImportError("mediapipe is required for PoseDetector.") from e
+
+        weights_dir = Path(__file__).parent.parent / "weights"
+        weights_dir.mkdir(parents=True, exist_ok=True)
+        local_path = weights_dir / "pose_landmarker_lite.task"
+
+        if not local_path.exists():
+            logger.info("Downloading Pose Landmarker model...")
+            urllib.request.urlretrieve(_POSE_MODEL_URL, str(local_path))
+
+        options = PoseLandmarkerOptions(
+            base_options=BaseOptions(
+                model_asset_path=str(local_path), 
+                delegate=BaseOptions.Delegate.CPU
+            ),
+            running_mode=RunningMode.IMAGE,
+            min_pose_presence_confidence=self._conf,
+            num_poses=5
+        )
+        self._landmarker = PoseLandmarker.create_from_options(options)
+        self._mp = mp
+
+    def detect(self, frame_rgb: np.ndarray, padding: float = 0.15) -> List[Tuple[int, int, int, int]]:
+        """Detect persons using keypoints and return bboxes (x1, y1, x2, y2)."""
+        if self._landmarker is None:
+            self.load()
+
+        h, w = frame_rgb.shape[:2]
+        mp_image = self._mp.Image(image_format=self._mp.ImageFormat.SRGB, data=frame_rgb)
+        result = self._landmarker.detect(mp_image)
+        
+        bboxes = []
+        for pose_landmarks in result.pose_landmarks:
+            # Extract coordinates
+            xs = [lm.x * w for lm in pose_landmarks]
+            ys = [lm.y * h for lm in pose_landmarks]
+            
+            # Simple bbox from landmarks
+            x1, y1 = min(xs), min(ys)
+            x2, y2 = max(xs), max(ys)
+            
+            bw, bh = x2 - x1, y2 - y1
+            
+            # Add padding
+            pad_w, pad_h = bw * padding, bh * padding
+            
+            # Clamp to frame
+            fx1 = max(0, x1 - pad_w)
+            fy1 = max(0, y1 - pad_h)
+            fx2 = min(w, x2 + pad_w)
+            # Always extend to the bottom for visio/webcam scenarios
+            fy2 = h 
+            
+            bboxes.append((int(fx1), int(fy1), int(fx2), int(fy2)))
+            
         return bboxes

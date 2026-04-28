@@ -9,7 +9,7 @@ import numpy as np
 from core.base import Preprocessor
 from core.parameters import ParameterSpec
 from core.registry import preprocessors
-from core.detector import PersonDetector
+from core.detector import PersonDetector, PoseDetector
 from core import context
 
 logger = logging.getLogger(__name__)
@@ -22,6 +22,7 @@ class PersonZoom(Preprocessor):
     def __init__(self, **params):
         super().__init__(**params)
         self.detector = PersonDetector()
+        self.pose_detector = PoseDetector()
         self.last_bboxes = []
         self._smoothed_state = []  # List of [x1, y1, x2, y2] as floats
         self.frame_count = 0
@@ -29,6 +30,14 @@ class PersonZoom(Preprocessor):
     @classmethod
     def parameter_specs(cls):
         return [
+            ParameterSpec(
+                name="detection_mode",
+                type="choice",
+                default="object",
+                choices=["object", "pose"],
+                label="Mode de détection",
+                help="Object: Détecte la boîte englobante. Pose: Utilise les points clés (plus stable).",
+            ),
             ParameterSpec(
                 name="padding",
                 type="float",
@@ -83,7 +92,13 @@ class PersonZoom(Preprocessor):
         # Only run detection every N frames
         if self.frame_count % interval == 0:
             padding = self.params.get("padding", 0.2)
-            raw_bboxes = self.detector.detect(frame, padding=padding)
+            mode = self.params.get("detection_mode", "object")
+            
+            if mode == "pose":
+                raw_bboxes = self.pose_detector.detect(frame, padding=padding)
+            else:
+                raw_bboxes = self.detector.detect(frame, padding=padding)
+                
             self.last_bboxes = self._update_smoothed_boxes(raw_bboxes, alpha, hysteresis)
         
         self.frame_count += 1

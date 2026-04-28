@@ -116,10 +116,16 @@ if run_clicked:
     col_m, col_c = st.columns(2)
     with col_m:
         st.caption("Mask — alpha matte (white = foreground)")
-        st.video(paths["mask"].read_bytes())
+        if paths["mask"].exists():
+            st.video(paths["mask"].read_bytes())
+        else:
+            st.error("Fichier masque introuvable.")
     with col_c:
         st.caption("Composite — subject on black background")
-        st.video(paths["composite"].read_bytes())
+        if paths["composite"].exists():
+            st.video(paths["composite"].read_bytes())
+        else:
+            st.error("Fichier composite introuvable.")
 
 st.divider()
 

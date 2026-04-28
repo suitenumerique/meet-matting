@@ -35,7 +35,8 @@ def process_video(
     total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    # Using avc1 (H.264) for better web compatibility and reliability on macOS
+    fourcc = cv2.VideoWriter_fourcc(*"avc1")
 
     mask_path = output_dir / "mask.mp4"
     composite_path = output_dir / "composite.mp4"
