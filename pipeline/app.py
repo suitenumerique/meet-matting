@@ -143,9 +143,9 @@ with tab_live:
     with col_ctrl:
         c1, c2 = st.columns(2)
         with c1:
-            bg_mode = st.selectbox("Arrière-plan", ["Noir", "Flou (Portrait)", "Bureau Moderne", "Nature"])
+            bg_mode = st.selectbox("Arrière-plan", ["Original", "Noir", "Flou (Portrait)", "Bureau Moderne", "Nature"], index=0)
         with c2:
-            live_skip = st.number_input("Skip Frames (Live)", min_value=1, value=1, help="1 = inférence à chaque frame, 2 = une sur deux, etc.")
+            live_skip = st.number_input("Skip Frames (Live)", min_value=1, value=1)
     with col_stats:
         fps_placeholder = st.empty()
     
@@ -153,7 +153,6 @@ with tab_live:
     
     if run_cam:
         cap = cv2.VideoCapture(0, cv2.CAP_AVFOUNDATION)
-        # Try to force 60 FPS and 720p for capture
         cap.set(cv2.CAP_PROP_FPS, 60)
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
@@ -161,9 +160,11 @@ with tab_live:
         st_frame = st.empty()
         st_debug = st.empty()
         
-        # Background Cache to avoid re-downloading
+        # Background Cache to avoid re-downloading and re-resizing
         bg_cache = {}
-        def get_bg(mode):
+        bg_resized_cache = {} # (mode, target_w, target_h) -> img
+
+        def get_bg(mode, w, h):
             if mode not in bg_cache:
                 if mode == "Bureau Moderne":
                     url = "https://images.unsplash.com/photo-1497366216548-37526070297c?auto=format&fit=crop&w=1280&q=80"
@@ -175,62 +176,81 @@ with tab_live:
                     img = cv2.imdecode(np.asarray(bytearray(resp.read()), dtype="uint8"), 1)
                     bg_cache[mode] = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
                 except: return None
-            return bg_cache.get(mode)
+            
+            # Check resized cache
+            key = (mode, w, h)
+            if key not in bg_resized_cache:
+                bg_resized_cache[key] = cv2.resize(bg_cache[mode], (w, h))
+            return bg_resized_cache[key]
 
         idx = 0
         last_mask = None
-        t_start = time.time()
+        # Rolling average for FPS
+        fps_history = []
+        inf_history = []
         
         while run_cam:
             loop_start = time.time()
             ret, bgr = cap.read()
             if not ret: break
-            rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+            rgb_full = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+            h_full, w_full = rgb_full.shape[:2]
             
-            # --- INFERENCE ---
+            # --- 1. PREVIEW RESIZE ---
+            disp_w = 640
+            scale = disp_w / w_full
+            disp_h = int(h_full * scale)
+            rgb = cv2.resize(rgb_full, (disp_w, disp_h))
+            
+            # --- 2. INFERENCE ---
             inf_start = time.time()
-            if idx % live_skip == 0 or last_mask is None:
-                res = pipeline.process_frame(rgb)
-                last_mask = res.get("final_mask", res.get("mask"))
-                if last_mask is None:
-                    last_mask = np.ones(rgb.shape[:2], dtype=np.float32)
-            inf_time = (time.time() - inf_start) * 1000 # ms
+            inf_ran = False
+            if bg_mode != "Original":
+                if idx % live_skip == 0 or last_mask is None:
+                    res = pipeline.process_frame(rgb_full)
+                    last_mask_full = res.get("final_mask", res.get("mask"))
+                    if last_mask_full is None:
+                        last_mask_full = np.ones((h_full, w_full), dtype=np.float32)
+                    last_mask = cv2.resize(last_mask_full, (disp_w, disp_h))
+                    inf_ran = True
+                
+                m3d = last_mask[:, :, np.newaxis]
             
-            # Ensure mask size
-            if last_mask.shape[:2] != rgb.shape[:2]:
-                last_mask = cv2.resize(last_mask, (rgb.shape[1], rgb.shape[0]))
+            if inf_ran:
+                inf_history.append(time.time() - inf_start)
+                if len(inf_history) > 30: inf_history.pop(0)
             
-            m3d = last_mask[:, :, np.newaxis]
-            curr_bg_img = get_bg(bg_mode)
-
-            # Composition
-            if bg_mode == "Noir": 
+            # --- 3. COMPOSITION ---
+            if bg_mode == "Original":
+                final = rgb
+            elif bg_mode == "Noir": 
                 final = (rgb * m3d).astype(np.uint8)
             elif bg_mode == "Flou (Portrait)":
-                # Small kernel for speed in live
-                blurred = cv2.GaussianBlur(rgb, (31, 31), 0)
+                small = cv2.resize(rgb, (disp_w//4, disp_h//4))
+                small_blur = cv2.GaussianBlur(small, (15, 15), 0)
+                blurred = cv2.resize(small_blur, (disp_w, disp_h))
                 final = (rgb * m3d + blurred * (1 - m3d)).astype(np.uint8)
-            elif curr_bg_img is not None:
-                bg_r = cv2.resize(curr_bg_img, (rgb.shape[1], rgb.shape[0]))
-                final = (rgb * m3d + bg_r * (1 - m3d)).astype(np.uint8)
-            else: 
-                final = (rgb * m3d).astype(np.uint8)
+            else:
+                curr_bg = get_bg(bg_mode, disp_w, disp_h)
+                if curr_bg is not None:
+                    final = (rgb * m3d + curr_bg * (1 - m3d)).astype(np.uint8)
+                else:
+                    final = (rgb * m3d).astype(np.uint8)
 
-            # --- DISPLAY OPTIMIZATION (480p preview) ---
-            disp_w = 640
-            scale = disp_w / rgb.shape[1]
-            disp_h = int(rgb.shape[0] * scale)
-            final_disp = cv2.resize(final, (disp_w, disp_h))
-
-            st_frame.image(final_disp, channels="RGB", use_container_width=True)
+            # --- 4. DISPLAY ---
+            st_frame.image(final, channels="RGB", use_container_width=True, output_format="JPEG")
+            
+            # Update FPS
+            fps_history.append(time.time() - loop_start)
+            if len(fps_history) > 30: fps_history.pop(0)
             
             idx += 1
-            if idx % 10 == 0:
-                total_time = (time.time() - loop_start) * 1000 # ms
-                current_fps = 10.0 / max(time.time() - t_start, 0.001)
+            if idx % 5 == 0:
+                avg_loop = sum(fps_history) / len(fps_history)
+                avg_inf = sum(inf_history) / len(inf_history) if inf_history else 0
+                current_fps = 1.0 / avg_loop if avg_loop > 0 else 0
                 fps_placeholder.metric("Live FPS", f"{current_fps:.1f}")
-                st_debug.caption(f"Inférence: {inf_time:.1f}ms | Loop: {total_time:.1f}ms")
-                t_start = time.time()
+                st_debug.caption(f"IA: {avg_inf*1000:.1f}ms | Boucle: {avg_loop*1000:.1f}ms | Skip: {live_skip}")
                 
         cap.release()
 
