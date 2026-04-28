@@ -23,11 +23,11 @@ class TemporalSmoothing(Postprocessor):
             ParameterSpec(
                 name="alpha",
                 type="float",
-                default=0.4,
+                default=0.15,
                 label="Smoothing (Alpha)",
-                min_value=0.05,
+                min_value=0.01,
                 max_value=1.0,
-                step=0.05,
+                step=0.01,
                 help="Smoothing factor. Lower = smoother but more lag.",
             ),
         ]

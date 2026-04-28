@@ -40,9 +40,11 @@ def process_video(
 
     mask_path = output_dir / "mask.mp4"
     composite_path = output_dir / "composite.mp4"
+    original_path = output_dir / "original.mp4"
 
     mask_writer = cv2.VideoWriter(str(mask_path), fourcc, output_fps, (w, h))
     composite_writer = cv2.VideoWriter(str(composite_path), fourcc, output_fps, (w, h))
+    original_writer = cv2.VideoWriter(str(original_path), fourcc, output_fps, (w, h))
 
     idx = 0
     processed_count = 0
@@ -68,6 +70,7 @@ def process_video(
                 mask_uint8 = (result["final_mask"] * 255).astype(np.uint8)
                 mask_writer.write(cv2.cvtColor(mask_uint8, cv2.COLOR_GRAY2BGR))
                 composite_writer.write(cv2.cvtColor(result["final"], cv2.COLOR_RGB2BGR))
+                original_writer.write(bgr)
                 
                 processed_count += 1
                 if on_progress:
@@ -78,5 +81,6 @@ def process_video(
         cap.release()
         mask_writer.release()
         composite_writer.release()
+        original_writer.release()
 
-    return {"mask": mask_path, "composite": composite_path}
+    return {"mask": mask_path, "composite": composite_path, "original": original_path}

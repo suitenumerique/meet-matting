@@ -13,6 +13,13 @@ class Component(ABC):
     name: str
     description: str
 
+    def reset(self) -> None:
+        """Reset any internal state (buffers, counters, etc.).
+
+        Called before batch processing starts and when pipeline parameters change.
+        Subclasses with stateful behaviour must override this.
+        """
+
     def __init__(self, **params):
         """Store params after validating that all required keys are present.
 

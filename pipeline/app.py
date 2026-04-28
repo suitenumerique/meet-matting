@@ -10,6 +10,7 @@ from core.registry import models, postprocessors, preprocessors
 from core.video_io import frame_count, read_frame
 from core.video_processing import process_video
 from ui.sidebar import render_sidebar
+from ui.synced_player import display_synced_player
 from ui.video_panel import display_four_panels
 
 # Auto-discover all plugins.
@@ -120,7 +121,7 @@ col_skip, col_btn, col_info = st.columns([1, 1, 2])
 with col_skip:
     skip_frames = st.number_input("Skip Frames", min_value=1, value=1, help="1 = all frames, 2 = every 2nd frame, etc.")
 with col_btn:
-    st.write("") # Spacer
+    st.write("")  # Spacer
     run_clicked = st.button("Process & save", type="primary", use_container_width=True)
 with col_info:
     frames_to_process = (total + skip_frames - 1) // skip_frames
@@ -134,7 +135,6 @@ if run_clicked:
     run_dir = OUTPUT_DIR / f"{selection.video_path.stem}__{selection.model_name}__{timestamp}"
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    # Save configuration to run directory
     config_data = {
         "timestamp": timestamp,
         "video_source": str(selection.video_path),
@@ -147,7 +147,6 @@ if run_clicked:
     with open(run_dir / "config.json", "w") as f:
         json.dump(config_data, f, indent=4)
 
-    # IMPORTANT: Reset pipeline state before full processing
     pipeline.reset()
 
     progress_bar = st.progress(0.0)
@@ -157,12 +156,13 @@ if run_clicked:
         progress_bar.progress(done / max(total_frames, 1))
         status.caption(f"Frame {done} / {total_frames} | {current_fps:.1f} FPS")
 
-    with st.spinner("Processing video…"):
+    with st.spinner("Processing video..."):
         paths = process_video(pipeline, selection.video_path, run_dir, _on_progress, skip_frames=skip_frames)
 
     progress_bar.progress(1.0)
     status.empty()
     st.success(f"Saved to `{run_dir.relative_to(OUTPUT_DIR.parent)}`")
+<<<<<<< HEAD
 
     col_m, col_c = st.columns(2)
     with col_m:
@@ -177,6 +177,9 @@ if run_clicked:
             st.video(paths["composite"].read_bytes())
         else:
             st.error("Fichier composite introuvable.")
+=======
+    display_synced_player(paths)
+>>>>>>> 808cd8f (modif de l'affichage vidéo et ajout de quelques post-processing anti-flittering)
 
 st.divider()
 
@@ -205,6 +208,7 @@ with st.expander("Browse saved outputs", expanded=False):
                         conf = json.load(f)
                     st.json(conf)
 
+<<<<<<< HEAD
                 col_m, col_c = st.columns(2)
                 with col_m:
                     mask_file = run_dir / "mask.mp4"
@@ -220,3 +224,10 @@ with st.expander("Browse saved outputs", expanded=False):
                         st.video(comp_file.read_bytes())
                     else:
                         st.info("composite.mp4 not found.")
+=======
+        display_synced_player({
+            "original":  run_dir / "original.mp4",
+            "composite": run_dir / "composite.mp4",
+            "mask":      run_dir / "mask.mp4",
+        })
+>>>>>>> 808cd8f (modif de l'affichage vidéo et ajout de quelques post-processing anti-flittering)
