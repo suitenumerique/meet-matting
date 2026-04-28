@@ -105,6 +105,38 @@ class MattingPipeline:
                 1,
             )
 
+        # Draw Pose Landmarks if available
+        if context.get_val("show_landmarks") and context.get_val("pose_landmarks"):
+            all_pose_landmarks = context.get_val("pose_landmarks")
+            h, w = debug_frame.shape[:2]
+            
+            # Key connections: (start_idx, end_idx)
+            # Shoulders (11, 12), Hips (23, 24), Shoulders to Hips (11-23, 12-24), Arms, Legs
+            connections = [
+                (11, 12), (11, 13), (13, 15), (12, 14), (14, 16), # Upper body
+                (23, 24), (23, 25), (25, 27), (24, 26), (26, 28), # Lower body
+                (11, 23), (12, 24), # Torso sides
+                (0, 1), (1, 2), (2, 3), (0, 4), (4, 5), (5, 6) # Face (simplified)
+            ]
+            
+            for pose_landmarks in all_pose_landmarks:
+                # Draw connections
+                for start_idx, end_idx in connections:
+                    if start_idx < len(pose_landmarks) and end_idx < len(pose_landmarks):
+                        p1 = pose_landmarks[start_idx]
+                        p2 = pose_landmarks[end_idx]
+                        # Only draw if visibility is decent
+                        if getattr(p1, 'visibility', 1.0) > 0.5 and getattr(p2, 'visibility', 1.0) > 0.5:
+                            c1 = (int(p1.x * w), int(p1.y * h))
+                            c2 = (int(p2.x * w), int(p2.y * h))
+                            cv2.line(debug_frame, c1, c2, (0, 255, 255), 2)
+
+                # Draw points
+                for i, lm in enumerate(pose_landmarks):
+                    if getattr(lm, 'visibility', 1.0) > 0.5:
+                        cx, cy = int(lm.x * w), int(lm.y * h)
+                        cv2.circle(debug_frame, (cx, cy), 3, (0, 255, 0), -1)
+
         return {
             "original": original,
             "preprocessed": debug_frame,

@@ -23,7 +23,16 @@ st.title("Background matting pipeline")
 # ── Config Import ──────────────────────────────────────────────────────────────
 with st.sidebar.expander("Import Config", expanded=False):
     uploaded_config = st.file_uploader("Upload config.json", type="json")
+    
+    # Only apply if it's a NEW file we haven't processed yet
+    should_apply = False
     if uploaded_config is not None:
+        file_id = f"{uploaded_config.name}_{uploaded_config.size}"
+        if st.session_state.get("last_config_id") != file_id:
+            should_apply = True
+            st.session_state["last_config_id"] = file_id
+
+    if should_apply:
         try:
             config_to_apply = json.load(uploaded_config)
             
@@ -52,7 +61,6 @@ with st.sidebar.expander("Import Config", expanded=False):
             if "preprocessors" in config_to_apply:
                 names = [p[0] for p in config_to_apply["preprocessors"]]
                 st.session_state["pre_select"] = names
-                # Inject params for each
                 for i, (name, params) in enumerate(config_to_apply["preprocessors"]):
                     for pk, pv in params.items():
                         st.session_state[f"pre_{i}_{pk}"] = pv
@@ -65,7 +73,9 @@ with st.sidebar.expander("Import Config", expanded=False):
                     for pk, pv in params.items():
                         st.session_state[f"post_{i}_{pk}"] = pv
             
-            st.success("Configuration chargée ! L'interface a été mise à jour.")
+            st.success("Configuration chargée ! Vous pouvez maintenant la modifier librement.")
+            # Trigger a rerun to make sure all widgets see the new session_state
+            st.rerun()
         except Exception as e:
             st.error(f"Erreur lors de l'import : {e}")
 

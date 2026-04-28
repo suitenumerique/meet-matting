@@ -119,6 +119,9 @@ class PoseDetector:
         mp_image = self._mp.Image(image_format=self._mp.ImageFormat.SRGB, data=frame_rgb)
         result = self._landmarker.detect(mp_image)
         
+        # Store for debug/visualization
+        self.last_result = result
+        
         bboxes = []
         for pose_landmarks in result.pose_landmarks:
             # Extract coordinates
@@ -143,4 +146,64 @@ class PoseDetector:
             
             bboxes.append((int(fx1), int(fy1), int(fx2), int(fy2)))
             
+        return bboxes
+
+
+class YoloDetector:
+    """Uses Ultralytics YOLOv8 for high-performance person detection."""
+    def __init__(self, model_size: str = "n", score_threshold: float = 0.25):
+        self._model = None
+        self._size = model_size
+        self._conf = score_threshold
+
+    def load(self):
+        try:
+            from ultralytics import YOLO
+        except ImportError as e:
+            raise ImportError(
+                "ultralytics is required for YoloDetector. "
+                "Please run: uv pip install ultralytics"
+            ) from e
+
+        weights_dir = Path(__file__).parent.parent / "weights"
+        weights_dir.mkdir(parents=True, exist_ok=True)
+        # Using nano version (yolov8n.pt) for speed
+        model_path = weights_dir / f"yolov8{self._size}.pt"
+        
+        # YOLO will handle download automatically if not found
+        self._model = YOLO(str(model_path))
+
+    def detect(self, frame_rgb: np.ndarray, padding: float = 0.05) -> List[Tuple[int, int, int, int]]:
+        """Detect persons using YOLO and return bboxes (x1, y1, x2, y2)."""
+        if self._model is None:
+            self.load()
+
+        h, w = frame_rgb.shape[:2]
+        
+        # Inference
+        results = self._model.predict(
+            source=frame_rgb,
+            conf=self._conf,
+            classes=[0], # 0 is 'person' in COCO
+            verbose=False
+        )
+        
+        bboxes = []
+        for result in results:
+            for box in result.boxes:
+                # Get xyxy tensor and convert to list
+                x1, y1, x2, y2 = box.xyxy[0].tolist()
+                
+                bw, bh = x2 - x1, y2 - y1
+                
+                # Add padding
+                pad_w, pad_h = bw * padding, bh * padding
+                
+                fx1 = max(0, x1 - pad_w)
+                fy1 = max(0, y1 - pad_h)
+                fx2 = min(w, x2 + pad_w)
+                fy2 = min(h, y2 + pad_h)
+                
+                bboxes.append((int(fx1), int(fy1), int(fx2), int(fy2)))
+                
         return bboxes
