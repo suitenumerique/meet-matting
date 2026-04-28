@@ -28,14 +28,14 @@ def process_video(
     cap = cv2.VideoCapture(str(video_path))
     # Adjust output FPS based on skipping
     orig_fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
-    output_fps = orig_fps / skip_frames
+    # Keep original FPS for smooth output
+    output_fps = orig_fps
     
     w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    # Using avc1 (H.264) for better web compatibility and reliability on macOS
     fourcc = cv2.VideoWriter_fourcc(*"avc1")
 
     mask_path = output_dir / "mask.mp4"
@@ -47,7 +47,7 @@ def process_video(
     original_writer = cv2.VideoWriter(str(original_path), fourcc, output_fps, (w, h))
 
     idx = 0
-    processed_count = 0
+    last_result = None
     start_time = time.time()
     
     try:
@@ -56,25 +56,34 @@ def process_video(
             if not ok:
                 break
             
-            if idx % skip_frames == 0:
-                frame_rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-                
+            frame_rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+            
+            # Determine if we should run inference or reuse last result
+            if idx % skip_frames == 0 or last_result is None:
                 iter_start = time.time()
-                result = pipeline.process_frame(frame_rgb)
+                last_result = pipeline.process_frame(frame_rgb)
                 iter_end = time.time()
-                
-                # Calculate local FPS for this frame
                 fps_val = 1.0 / max(iter_end - iter_start, 0.001)
-
-                # Save results
-                mask_uint8 = (result["final_mask"] * 255).astype(np.uint8)
-                mask_writer.write(cv2.cvtColor(mask_uint8, cv2.COLOR_GRAY2BGR))
-                composite_writer.write(cv2.cvtColor(result["final"], cv2.COLOR_RGB2BGR))
-                original_writer.write(bgr)
+            else:
+                # REUSE MASK but apply to CURRENT frame for fluidity
+                # We need to re-composite because the background/original changed
+                mask = last_result["final_mask"]
+                comp_mask = mask[:, :, np.newaxis]
+                final = (frame_rgb * comp_mask).astype(np.uint8)
                 
-                processed_count += 1
-                if on_progress:
-                    on_progress(idx + 1, total, fps_val)
+                last_result = {
+                    "final_mask": mask,
+                    "final": final
+                }
+                fps_val = orig_fps # Dummy for skipped frames
+
+            # Always write to output to maintain original FPS
+            mask_uint8 = (last_result["final_mask"] * 255).astype(np.uint8)
+            mask_writer.write(cv2.cvtColor(mask_uint8, cv2.COLOR_GRAY2BGR))
+            composite_writer.write(cv2.cvtColor(last_result["final"], cv2.COLOR_RGB2BGR))
+            
+            if on_progress:
+                on_progress(idx + 1, total, fps_val)
             
             idx += 1
     finally:

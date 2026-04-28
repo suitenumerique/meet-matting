@@ -119,6 +119,9 @@ class PoseDetector:
         mp_image = self._mp.Image(image_format=self._mp.ImageFormat.SRGB, data=frame_rgb)
         result = self._landmarker.detect(mp_image)
         
+        # Store for debug/visualization
+        self.last_result = result
+        
         bboxes = []
         for pose_landmarks in result.pose_landmarks:
             # Extract coordinates
@@ -142,5 +145,118 @@ class PoseDetector:
             fy2 = h 
             
             bboxes.append((int(fx1), int(fy1), int(fx2), int(fy2)))
+            
+        return bboxes
+
+
+class YoloDetector:
+    """Uses Ultralytics YOLOv8 for high-performance person detection."""
+    def __init__(self, model_size: str = "n", score_threshold: float = 0.25):
+        self._model = None
+        self._size = model_size
+        self._conf = score_threshold
+
+    def load(self):
+        try:
+            from ultralytics import YOLO
+        except ImportError as e:
+            raise ImportError(
+                "ultralytics is required for YoloDetector. "
+                "Please run: uv pip install ultralytics"
+            ) from e
+
+        weights_dir = Path(__file__).parent.parent / "weights"
+        weights_dir.mkdir(parents=True, exist_ok=True)
+        # Using nano version (yolov8n.pt) for speed
+        model_path = weights_dir / f"yolov8{self._size}.pt"
+        
+        # YOLO will handle download automatically if not found
+        self._model = YOLO(str(model_path))
+
+    def detect(self, frame_rgb: np.ndarray, padding: float = 0.05) -> List[Tuple[int, int, int, int]]:
+        """Detect persons using YOLO and return bboxes (x1, y1, x2, y2)."""
+        if self._model is None:
+            self.load()
+
+        h, w = frame_rgb.shape[:2]
+        
+        # Inference
+        results = self._model.predict(
+            source=frame_rgb,
+            conf=self._conf,
+            classes=[0], # 0 is 'person' in COCO
+            verbose=False
+        )
+        
+        bboxes = []
+        for result in results:
+            for box in result.boxes:
+                # Get xyxy tensor and convert to list
+                x1, y1, x2, y2 = box.xyxy[0].tolist()
+                
+                bw, bh = x2 - x1, y2 - y1
+                
+                # Add padding
+                pad_w, pad_h = bw * padding, bh * padding
+                
+                fx1 = max(0, x1 - pad_w)
+                fy1 = max(0, y1 - pad_h)
+                fx2 = min(w, x2 + pad_w)
+                fy2 = min(h, y2 + pad_h)
+                
+                bboxes.append((int(fx1), int(fy1), int(fx2), int(fy2)))
+                
+        return bboxes
+
+
+class FaceDetector:
+    """Uses MediaPipe Face Detector (BlazeFace) to find faces."""
+    def __init__(self, min_detection_confidence: float = 0.5):
+        self._detector = None
+        self._conf = min_detection_confidence
+
+    def load(self):
+        try:
+            import mediapipe as mp
+            from mediapipe.tasks.python import BaseOptions
+            from mediapipe.tasks.python.vision import FaceDetector, FaceDetectorOptions, RunningMode
+        except ImportError as e:
+            raise ImportError("mediapipe is required for FaceDetector.") from e
+
+        weights_dir = Path(__file__).parent.parent / "weights"
+        weights_dir.mkdir(parents=True, exist_ok=True)
+        local_path = weights_dir / "face_detector.tflite"
+
+        if not local_path.exists():
+            logger.info("Downloading Face Detector model...")
+            url = "https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/latest/blaze_face_short_range.tflite"
+            urllib.request.urlretrieve(url, str(local_path))
+
+        options = FaceDetectorOptions(
+            base_options=BaseOptions(
+                model_asset_path=str(local_path), 
+                delegate=BaseOptions.Delegate.CPU
+            ),
+            running_mode=RunningMode.IMAGE,
+            min_detection_confidence=self._conf
+        )
+        self._detector = FaceDetector.create_from_options(options)
+        self._mp = mp
+
+    def detect(self, frame_rgb: np.ndarray) -> List[Tuple[int, int, int, int]]:
+        """Detect faces and return bboxes (x1, y1, x2, y2)."""
+        if self._detector is None:
+            self.load()
+
+        h, w = frame_rgb.shape[:2]
+        mp_image = self._mp.Image(image_format=self._mp.ImageFormat.SRGB, data=frame_rgb)
+        result = self._detector.detect(mp_image)
+        
+        bboxes = []
+        for detection in result.detections:
+            bbox = detection.bounding_box
+            x1, y1 = bbox.origin_x, bbox.origin_y
+            x2, y2 = x1 + bbox.width, y1 + bbox.height
+            bboxes.append((int(x1), int(y1), int(x2), int(y2)))
             
         return bboxes

@@ -9,7 +9,7 @@ import numpy as np
 from core.base import Preprocessor
 from core.parameters import ParameterSpec
 from core.registry import preprocessors
-from core.detector import PersonDetector, PoseDetector
+from core.detector import PersonDetector, PoseDetector, YoloDetector, FaceDetector
 from core import context
 
 logger = logging.getLogger(__name__)
@@ -23,6 +23,8 @@ class PersonZoom(Preprocessor):
         super().__init__(**params)
         self.detector = PersonDetector()
         self.pose_detector = PoseDetector()
+        self.yolo_detector = YoloDetector()
+        self.face_detector = FaceDetector()
         self.last_bboxes = []
         self._smoothed_state = []  # List of [x1, y1, x2, y2] as floats
         self.frame_count = 0
@@ -34,9 +36,9 @@ class PersonZoom(Preprocessor):
                 name="detection_mode",
                 type="choice",
                 default="object",
-                choices=["object", "pose"],
+                choices=["object", "pose", "yolo", "face"],
                 label="Mode de détection",
-                help="Object: Détecte la boîte englobante. Pose: Utilise les points clés (plus stable).",
+                help="Object: MediaPipe. Pose: Points clés. Yolo: YOLOv8. Face: Ancrage visage (Visio).",
             ),
             ParameterSpec(
                 name="padding",
@@ -74,6 +76,13 @@ class PersonZoom(Preprocessor):
                 label="Hystérésis de Taille",
                 help="Seuil de changement de taille (0.1 = 10%). Empêche les micro-changements de taille.",
             ),
+            ParameterSpec(
+                name="show_landmarks",
+                type="bool",
+                default=False,
+                label="Afficher les points clés (33)",
+                help="Affiche le squelette et les points clés MediaPipe sur la vue debug.",
+            ),
         ]
 
     def reset(self):
@@ -96,6 +105,25 @@ class PersonZoom(Preprocessor):
             
             if mode == "pose":
                 raw_bboxes = self.pose_detector.detect(frame, padding=padding)
+            elif mode == "yolo":
+                raw_bboxes = self.yolo_detector.detect(frame, padding=padding)
+            elif mode == "face":
+                face_bboxes = self.face_detector.detect(frame)
+                raw_bboxes = []
+                h_img, w_img = frame.shape[:2]
+                for (fx1, fy1, fx2, fy2) in face_bboxes:
+                    # Face center and size
+                    fw, fh = fx2 - fx1, fy2 - fy1
+                    fcx = (fx1 + fx2) / 2
+                    
+                    # Expand to body: 
+                    # Width: ~5x face width for shoulders
+                    # Height: From above head to bottom of frame
+                    bx1 = max(0, fcx - fw * 2.5)
+                    bx2 = min(w_img, fcx + fw * 2.5)
+                    by1 = max(0, fy1 - fh * 1.0)
+                    by2 = h_img # Bottom of frame
+                    raw_bboxes.append((int(bx1), int(by1), int(bx2), int(by2)))
             else:
                 raw_bboxes = self.detector.detect(frame, padding=padding)
                 
@@ -105,6 +133,12 @@ class PersonZoom(Preprocessor):
         
         # Store in shared context for the pipeline/model to use
         context.set_val("person_bboxes", self.last_bboxes)
+        
+        # Add landmarks if needed and available
+        if self.params.get("show_landmarks") and self.params.get("detection_mode") == "pose":
+            context.set_val("show_landmarks", True)
+            if hasattr(self.pose_detector, "last_result"):
+                context.set_val("pose_landmarks", self.pose_detector.last_result.pose_landmarks)
 
         return frame
 
