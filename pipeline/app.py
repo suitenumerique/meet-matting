@@ -34,7 +34,7 @@ model = models.get(selection.model_name)(**selection.model_params)
 model.upsampler = upsamplers.get(selection.upsampler[0])(**selection.upsampler[1])
 model.load(selection.weights_path)  # may be None
 post_components = [postprocessors.get(name)(**params) for name, params in selection.postprocessors]
-pipeline = MattingPipeline(pre_components, model, post_components)
+pipeline = MattingPipeline(pre_components, model, post_components, bg_color=selection.bg_color)
 
 # ── Frame preview ──────────────────────────────────────────────────────────────
 st.subheader("Frame preview")

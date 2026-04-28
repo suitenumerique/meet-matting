@@ -37,4 +37,11 @@ class Sigmoid(Postprocessor):
             Sharpened mask, shape (H, W), dtype float32, range [0, 1].
         """
         gain = float(self.params["gain"])
-        return (1.0 / (1.0 + np.exp(-gain * (mask - 0.5)))).astype(np.float32)
+
+        def _s(x):
+            return 1.0 / (1.0 + np.exp(-gain * (x - 0.5)))
+
+        # Normalise so that f(0)=0 and f(1)=1 exactly.
+        s0 = _s(0.0)
+        s1 = _s(1.0)
+        return ((_s(mask) - s0) / (s1 - s0)).astype(np.float32)

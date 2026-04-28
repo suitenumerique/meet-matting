@@ -18,6 +18,7 @@ class SidebarSelection:
     model_params: dict
     weights_path: str | None
     upsampler: tuple[str, dict]
+    bg_color: tuple[int, int, int]
     preprocessors: list[tuple[str, dict]] = field(default_factory=list)
     postprocessors: list[tuple[str, dict]] = field(default_factory=list)
 
@@ -102,7 +103,14 @@ def render_sidebar() -> SidebarSelection:
             params = render_component_config(cls, key_prefix=f"pre_{i}")
             pre_configs.append((name, params))
 
-    # --- 5. Postprocessors ---
+    # --- 5. Background colour ---
+    with st.sidebar.expander("Background colour", expanded=False):
+        st.caption("Colour used for pixels identified as background in the final composite.")
+        hex_color = st.color_picker("Background", value="#000000", key="bg_color")
+        h = hex_color.lstrip("#")
+        bg_color: tuple[int, int, int] = (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
+
+    # --- 6. Postprocessors ---
     with st.sidebar.expander("Postprocessors", expanded=False):
         st.caption("Refinements applied to the raw mask *after* the model, before compositing.")
         post_names = postprocessors.names()
@@ -125,6 +133,7 @@ def render_sidebar() -> SidebarSelection:
         model_params=model_params,
         weights_path=weights_path,
         upsampler=upsampler,
+        bg_color=bg_color,
         preprocessors=pre_configs,
         postprocessors=post_configs,
     )
