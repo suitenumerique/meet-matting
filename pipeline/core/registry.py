@@ -58,3 +58,4 @@ class Registry:
 preprocessors = Registry("preprocessors")
 models = Registry("models")
 postprocessors = Registry("postprocessors")
+upsamplers = Registry("upsamplers")

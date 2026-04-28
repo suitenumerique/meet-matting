@@ -3,16 +3,18 @@ Preprocessor for Person Zoom.
 Detects people and populates the shared context with bounding boxes.
 Includes an update interval to save CPU/GPU cycles.
 """
+
 import logging
-import cv2
+
 import numpy as np
+from core import context
 from core.base import Preprocessor
+from core.detector import FaceDetector, PersonDetector, PoseDetector, YoloDetector
 from core.parameters import ParameterSpec
 from core.registry import preprocessors
-from core.detector import PersonDetector, PoseDetector, YoloDetector, FaceDetector
-from core import context
 
 logger = logging.getLogger(__name__)
+
 
 @preprocessors.register
 class PersonZoom(Preprocessor):
@@ -93,16 +95,16 @@ class PersonZoom(Preprocessor):
     def __call__(self, frame: np.ndarray) -> np.ndarray:
         # Signal to the pipeline that zoom is active
         context.set_val("person_zoom_active", True)
-        
+
         interval = self.params.get("update_interval", 1)
         alpha = self.params.get("smoothing", 0.3)
         hysteresis = self.params.get("hysteresis", 0.1)
-        
+
         # Only run detection every N frames
         if self.frame_count % interval == 0:
             padding = self.params.get("padding", 0.2)
             mode = self.params.get("detection_mode", "object")
-            
+
             if mode == "pose":
                 raw_bboxes = self.pose_detector.detect(frame, padding=padding)
             elif mode == "yolo":
@@ -111,29 +113,29 @@ class PersonZoom(Preprocessor):
                 face_bboxes = self.face_detector.detect(frame)
                 raw_bboxes = []
                 h_img, w_img = frame.shape[:2]
-                for (fx1, fy1, fx2, fy2) in face_bboxes:
+                for fx1, fy1, fx2, fy2 in face_bboxes:
                     # Face center and size
                     fw, fh = fx2 - fx1, fy2 - fy1
                     fcx = (fx1 + fx2) / 2
-                    
-                    # Expand to body: 
+
+                    # Expand to body:
                     # Width: ~5x face width for shoulders
                     # Height: From above head to bottom of frame
                     bx1 = max(0, fcx - fw * 2.5)
                     bx2 = min(w_img, fcx + fw * 2.5)
                     by1 = max(0, fy1 - fh * 1.0)
-                    by2 = h_img # Bottom of frame
+                    by2 = h_img  # Bottom of frame
                     raw_bboxes.append((int(bx1), int(by1), int(bx2), int(by2)))
             else:
                 raw_bboxes = self.detector.detect(frame, padding=padding)
-                
+
             self.last_bboxes = self._update_smoothed_boxes(raw_bboxes, alpha, hysteresis)
-        
+
         self.frame_count += 1
-        
+
         # Store in shared context for the pipeline/model to use
         context.set_val("person_bboxes", self.last_bboxes)
-        
+
         # Add landmarks if needed and available
         if self.params.get("show_landmarks") and self.params.get("detection_mode") == "pose":
             context.set_val("show_landmarks", True)
@@ -155,50 +157,47 @@ class PersonZoom(Preprocessor):
         for old_box in self._smoothed_state:
             old_cx = (old_box[0] + old_box[2]) / 2
             old_cy = (old_box[1] + old_box[3]) / 2
-            
+
             best_idx = -1
             min_dist = float("inf")
-            
+
             for i, raw_box in enumerate(raw_bboxes):
                 if i in used_raw:
                     continue
                 raw_cx = (raw_box[0] + raw_box[2]) / 2
                 raw_cy = (raw_box[1] + raw_box[3]) / 2
-                dist = ((old_cx - raw_cx)**2 + (old_cy - raw_cy)**2)**0.5
-                
+                dist = ((old_cx - raw_cx) ** 2 + (old_cy - raw_cy) ** 2) ** 0.5
+
                 # Threshold for matching: 30% of the diagonal of the box
-                diag = ((raw_box[2]-raw_box[0])**2 + (raw_box[3]-raw_box[1])**2)**0.5
+                diag = ((raw_box[2] - raw_box[0]) ** 2 + (raw_box[3] - raw_box[1]) ** 2) ** 0.5
                 if dist < min_dist and dist < diag * 0.5:
                     min_dist = dist
                     best_idx = i
-            
+
             if best_idx != -1:
                 raw_box = raw_bboxes[best_idx]
                 used_raw.add(best_idx)
-                
+
                 # 1. EMA Smoothing on coordinates
-                smoothed = [
-                    old_box[i] * (1 - alpha) + raw_box[i] * alpha
-                    for i in range(4)
-                ]
-                
+                smoothed = [old_box[i] * (1 - alpha) + raw_box[i] * alpha for i in range(4)]
+
                 # 2. Hysteresis on size to prevent "pumping"
                 old_w = old_box[2] - old_box[0]
                 old_h = old_box[3] - old_box[1]
                 new_w = smoothed[2] - smoothed[0]
                 new_h = smoothed[3] - smoothed[1]
-                
+
                 # If size change is small, preserve old size but keep new center
                 if abs(new_w - old_w) / max(old_w, 1) < hysteresis:
                     cx = (smoothed[0] + smoothed[2]) / 2
                     smoothed[0] = cx - old_w / 2
                     smoothed[2] = cx + old_w / 2
-                
+
                 if abs(new_h - old_h) / max(old_h, 1) < hysteresis:
                     cy = (smoothed[1] + smoothed[3]) / 2
                     smoothed[1] = cy - old_h / 2
                     smoothed[3] = cy + old_h / 2
-                    
+
                 new_state.append(smoothed)
             # If not matched, the person probably left the frame (we drop the box)
 

@@ -6,18 +6,19 @@ Force GPU/Metal for performance.
 """
 
 import logging
-import cv2
-import numpy as np
-import mediapipe as mp
-from mediapipe.tasks import python
-from mediapipe.tasks.python import vision
 from pathlib import Path
 
+import cv2
+import mediapipe as mp
+import numpy as np
 from core.base import MattingModel
 from core.parameters import ParameterSpec
 from core.registry import models
+from mediapipe.tasks import python
+from mediapipe.tasks.python import vision
 
 logger = logging.getLogger(__name__)
+
 
 @models.register
 class MediapipeSelfieMulticlass(MattingModel):
@@ -84,20 +85,23 @@ class MediapipeSelfieMulticlass(MattingModel):
         if weights_path:
             path = weights_path
         else:
-            path = str(Path(__file__).parent.parent / "weights" / "selfie_multiclass_256x256.tflite")
-            
+            path = str(
+                Path(__file__).parent.parent / "weights" / "selfie_multiclass_256x256.tflite"
+            )
+
         if not Path(path).exists():
             logger.error(f"Model file not found at: {path}")
             raise FileNotFoundError(f"MediaPipe model not found at {path}")
 
         # Configure GPU delegate
-        delegate = python.BaseOptions.Delegate.GPU if self.params.get("gpu", True) else python.BaseOptions.Delegate.CPU
-        
-        base_options = python.BaseOptions(
-            model_asset_path=path,
-            delegate=delegate
+        delegate = (
+            python.BaseOptions.Delegate.GPU
+            if self.params.get("gpu", True)
+            else python.BaseOptions.Delegate.CPU
         )
-        
+
+        base_options = python.BaseOptions(model_asset_path=path, delegate=delegate)
+
         options = vision.ImageSegmenterOptions(
             base_options=base_options,
             running_mode=vision.RunningMode.IMAGE,
@@ -115,22 +119,27 @@ class MediapipeSelfieMulticlass(MattingModel):
         # Convert to SRGBA for Metal compatibility on macOS
         frame_rgba = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2RGBA)
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGBA, data=frame_rgba)
-        
+
         result = self._segmenter.segment(mp_image)
-        
+
         # Build list of allowed indices
         # 0: bg, 1: hair, 2: body-skin, 3: face-skin, 4: clothes, 5: others
         allowed_indices = []
-        if self.params.get("include_hair", True): allowed_indices.append(1)
-        if self.params.get("include_body_skin", True): allowed_indices.append(2)
-        if self.params.get("include_face_skin", True): allowed_indices.append(3)
-        if self.params.get("include_clothes", True): allowed_indices.append(4)
-        if self.params.get("include_others", True): allowed_indices.append(5)
-        
+        if self.params.get("include_hair", True):
+            allowed_indices.append(1)
+        if self.params.get("include_body_skin", True):
+            allowed_indices.append(2)
+        if self.params.get("include_face_skin", True):
+            allowed_indices.append(3)
+        if self.params.get("include_clothes", True):
+            allowed_indices.append(4)
+        if self.params.get("include_others", True):
+            allowed_indices.append(5)
+
         h, w = frame_rgb.shape[:2]
         if not allowed_indices or not result.confidence_masks:
             return np.zeros((h, w), dtype=np.float32)
-            
+
         # Sum confidence masks of all selected categories
         person_mask = np.zeros((h, w), dtype=np.float32)
         for idx in allowed_indices:
@@ -139,8 +148,8 @@ class MediapipeSelfieMulticlass(MattingModel):
             if mask_data.ndim == 3:
                 mask_data = mask_data.squeeze(-1)
             person_mask += mask_data
-            
+
         # Clip to [0, 1] to avoid values > 1 at boundaries (though they should sum to 1 theoretically)
         person_mask = np.clip(person_mask, 0, 1)
-        
+
         return person_mask

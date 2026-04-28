@@ -5,7 +5,7 @@ from pathlib import Path
 
 import streamlit as st
 from config import VIDEO_DIR
-from core.registry import models, postprocessors, preprocessors
+from core.registry import models, postprocessors, preprocessors, upsamplers
 from core.video_io import list_videos
 
 from ui.widgets import render_component_config
@@ -17,6 +17,8 @@ class SidebarSelection:
     model_name: str
     model_params: dict
     weights_path: str | None
+    upsampler: tuple[str, dict]
+    bg_color: tuple[int, int, int]
     preprocessors: list[tuple[str, dict]] = field(default_factory=list)
     postprocessors: list[tuple[str, dict]] = field(default_factory=list)
 
@@ -27,8 +29,9 @@ def render_sidebar() -> SidebarSelection:
     Sections:
         1. Video selector
         2. Model selector + parameters
-        3. Preprocessor multiselect + per-step parameters
-        4. Postprocessor multiselect + per-step parameters
+        3. Upsampling method + parameters
+        4. Preprocessor multiselect + per-step parameters
+        5. Postprocessor multiselect + per-step parameters
     """
     # --- 1. Video ---
     with st.sidebar.expander("Video", expanded=True):
@@ -64,7 +67,24 @@ def render_sidebar() -> SidebarSelection:
 
         model_params = render_component_config(model_cls, key_prefix="model")
 
-    # --- 3. Preprocessors ---
+    # --- 3. Upsampling ---
+    with st.sidebar.expander("Upsampling", expanded=False):
+        st.caption(
+            "How the low-resolution mask is scaled back up to the original frame resolution. "
+            "Only applies to models that run inference at a reduced resolution."
+        )
+        upsampler_names = upsamplers.names()
+        chosen_upsampler = st.selectbox(
+            "Method",
+            options=upsampler_names,
+            key="upsampler_select",
+        )
+        upsampler_cls = upsamplers.get(chosen_upsampler)
+        st.caption(upsampler_cls.description)
+        upsampler_params = render_component_config(upsampler_cls, key_prefix="upsampler")
+        upsampler: tuple[str, dict] = (chosen_upsampler, upsampler_params)
+
+    # --- 4. Preprocessors ---
     with st.sidebar.expander("Preprocessors", expanded=False):
         st.caption(
             "Transforms applied to each frame *before* the model sees it. Does not affect the final composite."
@@ -83,7 +103,14 @@ def render_sidebar() -> SidebarSelection:
             params = render_component_config(cls, key_prefix=f"pre_{i}")
             pre_configs.append((name, params))
 
-    # --- 4. Postprocessors ---
+    # --- 5. Background colour ---
+    with st.sidebar.expander("Background colour", expanded=False):
+        st.caption("Colour used for pixels identified as background in the final composite.")
+        hex_color = st.color_picker("Background", value="#000000", key="bg_color")
+        h = hex_color.lstrip("#")
+        bg_color: tuple[int, int, int] = (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
+
+    # --- 6. Postprocessors ---
     with st.sidebar.expander("Postprocessors", expanded=False):
         st.caption("Refinements applied to the raw mask *after* the model, before compositing.")
         post_names = postprocessors.names()
@@ -105,6 +132,8 @@ def render_sidebar() -> SidebarSelection:
         model_name=model_name,
         model_params=model_params,
         weights_path=weights_path,
+        upsampler=upsampler,
+        bg_color=bg_color,
         preprocessors=pre_configs,
         postprocessors=post_configs,
     )

@@ -1,12 +1,12 @@
-import time
 import json
+import time
 from datetime import datetime
 from pathlib import Path
 
 import streamlit as st
 from config import OUTPUT_DIR
 from core.pipeline import MattingPipeline
-from core.registry import models, postprocessors, preprocessors
+from core.registry import models, postprocessors, preprocessors, upsamplers
 from core.video_io import frame_count, read_frame
 from core.video_processing import process_video
 from ui.sidebar import render_sidebar
@@ -17,6 +17,7 @@ from ui.video_panel import display_four_panels
 preprocessors.discover("preprocessing")
 models.discover("models")
 postprocessors.discover("postprocessing")
+upsamplers.discover("upsampling")
 
 st.set_page_config(layout="wide", page_title="Matting Pipeline Lab")
 st.title("Background matting pipeline")
@@ -24,7 +25,7 @@ st.title("Background matting pipeline")
 # ── Config Import ──────────────────────────────────────────────────────────────
 with st.sidebar.expander("Import Config", expanded=False):
     uploaded_config = st.file_uploader("Upload config.json", type="json")
-    
+
     # Only apply if it's a NEW file we haven't processed yet
     should_apply = False
     if uploaded_config is not None:
@@ -36,17 +37,18 @@ with st.sidebar.expander("Import Config", expanded=False):
     if should_apply:
         try:
             config_to_apply = json.load(uploaded_config)
-            
+
             # Basic keys
             if "model_name" in config_to_apply:
                 st.session_state["model_select"] = config_to_apply["model_name"]
             if "weights_path" in config_to_apply:
                 st.session_state["weights_path"] = config_to_apply["weights_path"]
-            
+
             # Video matching
             if "video_source" in config_to_apply:
-                from core.video_io import list_videos
                 from config import VIDEO_DIR
+                from core.video_io import list_videos
+
                 source_name = Path(config_to_apply["video_source"]).name
                 for v in list_videos(VIDEO_DIR):
                     if v.name == source_name:
@@ -57,23 +59,23 @@ with st.sidebar.expander("Import Config", expanded=False):
             if "model_params" in config_to_apply:
                 for k, v in config_to_apply["model_params"].items():
                     st.session_state[f"model_{k}"] = v
-            
+
             # Preprocessors
             if "preprocessors" in config_to_apply:
                 names = [p[0] for p in config_to_apply["preprocessors"]]
                 st.session_state["pre_select"] = names
-                for i, (name, params) in enumerate(config_to_apply["preprocessors"]):
+                for i, (_name, params) in enumerate(config_to_apply["preprocessors"]):
                     for pk, pv in params.items():
                         st.session_state[f"pre_{i}_{pk}"] = pv
-            
+
             # Postprocessors
             if "postprocessors" in config_to_apply:
                 names = [p[0] for p in config_to_apply["postprocessors"]]
                 st.session_state["post_select"] = names
-                for i, (name, params) in enumerate(config_to_apply["postprocessors"]):
+                for i, (_name, params) in enumerate(config_to_apply["postprocessors"]):
                     for pk, pv in params.items():
                         st.session_state[f"post_{i}_{pk}"] = pv
-            
+
             st.success("Configuration chargée ! Vous pouvez maintenant la modifier librement.")
             # Trigger a rerun to make sure all widgets see the new session_state
             st.rerun()
@@ -94,15 +96,22 @@ if selection.video_path is None:
 # Build pipeline from selection.
 pre_components = [preprocessors.get(name)(**params) for name, params in selection.preprocessors]
 model = models.get(selection.model_name)(**selection.model_params)
+model.upsampler = upsamplers.get(selection.upsampler[0])(**selection.upsampler[1])
 model.load(selection.weights_path)  # may be None
 post_components = [postprocessors.get(name)(**params) for name, params in selection.postprocessors]
-pipeline = MattingPipeline(pre_components, model, post_components)
+pipeline = MattingPipeline(pre_components, model, post_components, bg_color=selection.bg_color)
 
 # ── Frame preview ──────────────────────────────────────────────────────────────
 st.subheader("Frame preview")
-col_slider, col_fps = st.columns([4, 1])
-
+st.caption(
+    "Drag the slider to inspect any frame. "
+    "The four panels show each stage of the pipeline: "
+    "original → after preprocessing → raw model mask → final composite. "
+    "Note: the final composite is always blended onto the **original** frame, "
+    "so preprocessing changes are visible in the mask panel but not the composite."
+)
 total = frame_count(selection.video_path)
+col_slider, col_fps = st.columns([4, 1])
 with col_slider:
     idx = st.slider("Frame", 0, max(total - 1, 0), 0)
 
@@ -129,7 +138,9 @@ st.caption(
 
 col_skip, col_btn, col_info = st.columns([1, 1, 2])
 with col_skip:
-    skip_frames = st.number_input("Skip Frames", min_value=1, value=1, help="1 = all frames, 2 = every 2nd frame, etc.")
+    skip_frames = st.number_input(
+        "Skip Frames", min_value=1, value=1, help="1 = all frames, 2 = every 2nd frame, etc."
+    )
 with col_btn:
     st.write("")  # Spacer
     run_clicked = st.button("Process & save", type="primary", use_container_width=True)
@@ -167,12 +178,13 @@ if run_clicked:
         status.caption(f"Frame {done} / {total_frames} | {current_fps:.1f} FPS")
 
     with st.spinner("Processing video..."):
-        paths = process_video(pipeline, selection.video_path, run_dir, _on_progress, skip_frames=skip_frames)
+        paths = process_video(
+            pipeline, selection.video_path, run_dir, _on_progress, skip_frames=skip_frames
+        )
 
     progress_bar.progress(1.0)
     status.empty()
     st.success(f"Saved to `{run_dir.relative_to(OUTPUT_DIR.parent)}`")
-<<<<<<< HEAD
 
     col_m, col_c = st.columns(2)
     with col_m:
@@ -187,9 +199,7 @@ if run_clicked:
             st.video(paths["composite"].read_bytes())
         else:
             st.error("Fichier composite introuvable.")
-=======
     display_synced_player(paths)
->>>>>>> 808cd8f (modif de l'affichage vidéo et ajout de quelques post-processing anti-flittering)
 
 st.divider()
 
@@ -214,11 +224,10 @@ with st.expander("Browse saved outputs", expanded=False):
                 # Show config for this run
                 config_file = run_dir / "config.json"
                 if config_file.exists():
-                    with open(config_file, "r") as f:
+                    with open(config_file) as f:
                         conf = json.load(f)
                     st.json(conf)
 
-<<<<<<< HEAD
                 col_m, col_c = st.columns(2)
                 with col_m:
                     mask_file = run_dir / "mask.mp4"
@@ -234,10 +243,3 @@ with st.expander("Browse saved outputs", expanded=False):
                         st.video(comp_file.read_bytes())
                     else:
                         st.info("composite.mp4 not found.")
-=======
-        display_synced_player({
-            "original":  run_dir / "original.mp4",
-            "composite": run_dir / "composite.mp4",
-            "mask":      run_dir / "mask.mp4",
-        })
->>>>>>> 808cd8f (modif de l'affichage vidéo et ajout de quelques post-processing anti-flittering)
