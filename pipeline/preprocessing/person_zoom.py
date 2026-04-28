@@ -106,7 +106,15 @@ class PersonZoom(Preprocessor):
             if mode == "pose":
                 raw_bboxes = self.pose_detector.detect(frame, padding=padding)
             elif mode == "yolo":
+                h_img = frame.shape[0]
                 raw_bboxes = self.yolo_detector.detect(frame, padding=padding)
+                # Extend box to bottom if person is significant (> 5% height)
+                extended = []
+                for (x1, y1, x2, y2) in raw_bboxes:
+                    if (y2 - y1) / h_img > 0.05:
+                        y2 = h_img
+                    extended.append((x1, y1, x2, y2))
+                raw_bboxes = extended
             elif mode == "face":
                 face_bboxes = self.face_detector.detect(frame)
                 raw_bboxes = []
