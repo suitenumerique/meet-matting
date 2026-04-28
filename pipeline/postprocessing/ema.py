@@ -32,6 +32,9 @@ class TemporalSmoothing(Postprocessor):
             ),
         ]
 
+    def reset(self):
+        self._prev_mask = None
+
     def __call__(self, mask: np.ndarray, original_frame: np.ndarray) -> np.ndarray:
         if self._prev_mask is None or self._prev_mask.shape != mask.shape:
             self._prev_mask = mask.copy()

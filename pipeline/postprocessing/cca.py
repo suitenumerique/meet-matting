@@ -29,6 +29,9 @@ class ConnectedComponents(Postprocessor):
             ),
         ]
 
+    def reset(self):
+        pass
+
     def __call__(self, mask: np.ndarray, original_frame: np.ndarray) -> np.ndarray:
         if np.sum(mask) == 0:
             return mask

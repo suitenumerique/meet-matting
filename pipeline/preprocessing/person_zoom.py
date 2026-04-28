@@ -1,9 +1,11 @@
 """
-Preprocessor that detects persons and stores their bboxes in the shared context.
-This enables the 'Person Zoom' feature in compatible models.
+Preprocessor for Person Zoom.
+Detects people and populates the shared context with bounding boxes.
+Includes an update interval to save CPU/GPU cycles.
 """
-
 import logging
+import cv2
+import numpy as np
 from core.base import Preprocessor
 from core.parameters import ParameterSpec
 from core.registry import preprocessors
@@ -15,62 +17,63 @@ logger = logging.getLogger(__name__)
 @preprocessors.register
 class PersonZoom(Preprocessor):
     name = "person_zoom"
-    description = "Detects people to enable high-resolution crops in matting models."
+    description = "Zoom sur les personnes détectées pour une segmentation haute résolution."
 
     def __init__(self, **params):
         super().__init__(**params)
-        self._detector = PersonDetector(score_threshold=self.params["threshold"])
+        self.detector = PersonDetector()
+        self.last_bboxes = []
+        self.frame_count = 0
 
     @classmethod
     def parameter_specs(cls):
         return [
             ParameterSpec(
-                name="threshold",
-                type="float",
-                default=0.25,
-                label="Detection Threshold",
-                min_value=0.1,
-                max_value=0.9,
-                step=0.05,
-                help="Confidence threshold for person detection.",
-            ),
-            ParameterSpec(
                 name="padding",
                 type="float",
-                default=0.10,
-                label="Box Padding",
+                default=0.2,
                 min_value=0.0,
-                max_value=0.5,
-                step=0.05,
-                help="Extra margin around the detected person.",
+                max_value=1.0,
+                label="Rembourrage (Padding)",
+                help="Espace supplémentaire autour de la personne (0.0 à 1.0).",
             ),
             ParameterSpec(
-                name="debug_draw",
-                type="bool",
-                default=True,
-                label="Debug: Draw BBoxes",
-                help="Draw bboxes on the frame for visualization.",
+                name="update_interval",
+                type="int",
+                default=1,
+                min_value=1,
+                max_value=60,
+                label="Intervalle de rafraîchissement",
+                help="Nombre de frames entre chaque détection (1 = à chaque frame).",
             ),
         ]
 
-    def __call__(self, frame):
-        """Detect people and store bboxes in context."""
-        try:
-            bboxes = self._detector.detect(frame, padding=self.params["padding"])
-        except Exception as e:
-            logger.error(f"PersonZoom detection error: {e}")
-            bboxes = []
+    def reset(self):
+        self.last_bboxes = []
+        self.frame_count = 0
 
-        # Store bboxes in context
-        context.set_val("person_bboxes", bboxes)
-        # Indicate that PersonZoom is ACTIVE, so the model should not fallback to full frame
+    def __call__(self, frame: np.ndarray) -> np.ndarray:
+        # Signal to the pipeline that zoom is active
         context.set_val("person_zoom_active", True)
         
-        if self.params["debug_draw"] and bboxes:
-            import cv2
-            debug_frame = frame.copy()
-            for (x1, y1, x2, y2) in bboxes:
-                cv2.rectangle(debug_frame, (x1, y1), (x2, y2), (255, 255, 255), 2)
-            return debug_frame
+        interval = self.params.get("update_interval", 1)
+        
+        # Only run detection every N frames
+        if self.frame_count % interval == 0:
+            padding = self.params.get("padding", 0.2)
+            # PersonDetector returns [x1, y1, x2, y2]
+            self.last_bboxes = self.detector.detect(frame, padding=padding)
+        
+        self.frame_count += 1
+        
+        # Store in shared context for the pipeline/model to use
+        context.set_val("person_bboxes", self.last_bboxes)
 
-        return frame
+        # Draw debug boxes on the frame returned (debug_frame)
+        debug_frame = frame.copy()
+        for (x1, y1, x2, y2) in self.last_bboxes:
+            cv2.rectangle(debug_frame, (x1, y1), (x2, y2), (255, 255, 255), 2)
+            cv2.putText(debug_frame, "ZOOM ZONE", (x1, y1-10), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+
+        return debug_frame

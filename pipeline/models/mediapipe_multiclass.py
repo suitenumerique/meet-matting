@@ -2,6 +2,7 @@
 MediaPipe Selfie Multiclass model.
 Outputs a multiclass segmentation mask (Background, Hair, Body, etc.)
 Merged into a single person mask.
+Force GPU/Metal for performance.
 """
 
 import logging
@@ -27,9 +28,21 @@ class MediapipeSelfieMulticlass(MattingModel):
         super().__init__(**params)
         self._segmenter = None
 
+    def reset(self):
+        """Reset state (none for this model)."""
+        pass
+
     @classmethod
     def parameter_specs(cls):
-        return []
+        return [
+            ParameterSpec(
+                name="gpu",
+                type="bool",
+                default=True,
+                label="Use GPU",
+                help="Use GPU acceleration (Metal on macOS).",
+            ),
+        ]
 
     def load(self, weights_path: str | None = None):
         # Resolve absolute path to the model file
@@ -42,19 +55,24 @@ class MediapipeSelfieMulticlass(MattingModel):
             logger.error(f"Model file not found at: {path}")
             raise FileNotFoundError(f"MediaPipe model not found at {path}")
 
-        base_options = python.BaseOptions(model_asset_path=path)
+        # Configure GPU delegate
+        delegate = python.BaseOptions.Delegate.GPU if self.params.get("gpu", True) else python.BaseOptions.Delegate.CPU
+        
+        base_options = python.BaseOptions(
+            model_asset_path=path,
+            delegate=delegate
+        )
+        
         options = vision.ImageSegmenterOptions(
             base_options=base_options,
             running_mode=vision.RunningMode.IMAGE,
             output_category_mask=True,
         )
         self._segmenter = vision.ImageSegmenter.create_from_options(options)
-        logger.info(f"Loaded MediaPipe Multiclass from {path}")
+        logger.info(f"Loaded MediaPipe Multiclass from {path} (Delegate: {delegate.name})")
 
     def infer(self, frame_rgb: np.ndarray) -> np.ndarray:
-        """Pure inference: Image -> Mask. 
-        Scaling/Cropping is now handled globally by the Pipeline.
-        """
+        """Pure inference: Image -> Mask."""
         if self._segmenter is None:
             self.load()
 

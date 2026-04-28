@@ -1,3 +1,5 @@
+import time
+import json
 from datetime import datetime
 
 import streamlit as st
@@ -36,17 +38,22 @@ pipeline = MattingPipeline(pre_components, model, post_components)
 
 # ── Frame preview ──────────────────────────────────────────────────────────────
 st.subheader("Frame preview")
-st.caption(
-    "Drag the slider to inspect any frame. "
-    "The four panels show each stage of the pipeline: "
-    "original → after preprocessing → raw model mask → final composite. "
-    "Note: the final composite is always blended onto the **original** frame, "
-    "so preprocessing changes are visible in the mask panel but not the composite."
-)
+col_slider, col_fps = st.columns([4, 1])
+
 total = frame_count(selection.video_path)
-idx = st.slider("Frame", 0, max(total - 1, 0), 0)
+with col_slider:
+    idx = st.slider("Frame", 0, max(total - 1, 0), 0)
+
+# Run inference and measure FPS
 frame = read_frame(selection.video_path, idx)
+t0 = time.time()
 result = pipeline.process_frame(frame)
+t1 = time.time()
+fps = 1.0 / max(t1 - t0, 0.001)
+
+with col_fps:
+    st.metric("Inference FPS", f"{fps:.1f}")
+
 display_four_panels(result)
 
 st.divider()
@@ -54,33 +61,53 @@ st.divider()
 # ── Export full video ──────────────────────────────────────────────────────────
 st.subheader("Export full video")
 st.caption(
-    "Runs the full pipeline on every frame and saves two videos to `data/output/`: "
-    "**mask.mp4** (alpha matte) and **composite.mp4** (subject on black background). "
-    "Each run is saved in its own timestamped folder."
+    "Runs the full pipeline on every frame and saves results to `data/output/`. "
+    "Use 'Skip Frames' to speed up processing by skipping every N-1 frames."
 )
 
-col_btn, col_info = st.columns([1, 3])
+col_skip, col_btn, col_info = st.columns([1, 1, 2])
+with col_skip:
+    skip_frames = st.number_input("Skip Frames", min_value=1, value=1, help="1 = all frames, 2 = every 2nd frame, etc.")
 with col_btn:
+    st.write("") # Spacer
     run_clicked = st.button("Process & save", type="primary", use_container_width=True)
 with col_info:
+    frames_to_process = (total + skip_frames - 1) // skip_frames
     st.caption(
-        f"Will process **{total} frames** from `{selection.video_path.name}` "
+        f"Will process **{frames_to_process} frames** (1 every {skip_frames}) "
         f"with model `{selection.model_name}`."
     )
 
 if run_clicked:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     run_dir = OUTPUT_DIR / f"{selection.video_path.stem}__{selection.model_name}__{timestamp}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    # Save configuration to run directory
+    config_data = {
+        "timestamp": timestamp,
+        "video_source": str(selection.video_path),
+        "model_name": selection.model_name,
+        "model_params": selection.model_params,
+        "preprocessors": selection.preprocessors,
+        "postprocessors": selection.postprocessors,
+        "skip_frames": skip_frames,
+    }
+    with open(run_dir / "config.json", "w") as f:
+        json.dump(config_data, f, indent=4)
+
+    # IMPORTANT: Reset pipeline state before full processing
+    pipeline.reset()
 
     progress_bar = st.progress(0.0)
     status = st.empty()
 
-    def _on_progress(done: int, total_frames: int) -> None:
+    def _on_progress(done: int, total_frames: int, current_fps: float) -> None:
         progress_bar.progress(done / max(total_frames, 1))
-        status.caption(f"Frame {done} / {total_frames}")
+        status.caption(f"Frame {done} / {total_frames} | {current_fps:.1f} FPS")
 
     with st.spinner("Processing video…"):
-        paths = process_video(pipeline, selection.video_path, run_dir, _on_progress)
+        paths = process_video(pipeline, selection.video_path, run_dir, _on_progress, skip_frames=skip_frames)
 
     progress_bar.progress(1.0)
     status.empty()
@@ -109,6 +136,13 @@ with st.expander("Browse saved outputs", expanded=False):
         run_names = [r.name for r in runs]
         selected_run = st.selectbox("Run", run_names, key="browse_run")
         run_dir = OUTPUT_DIR / selected_run
+
+        # Show config for this run
+        config_file = run_dir / "config.json"
+        if config_file.exists():
+            with open(config_file, "r") as f:
+                conf = json.load(f)
+            st.json(conf)
 
         col_m, col_c = st.columns(2)
         with col_m:

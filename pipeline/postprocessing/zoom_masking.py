@@ -18,6 +18,9 @@ class PersonZoomMasking(Postprocessor):
     def parameter_specs(cls):
         return [] # No params needed
 
+    def reset(self):
+        pass
+
     def __call__(self, mask: np.ndarray, original_frame: np.ndarray) -> np.ndarray:
         bboxes = context.get_val("person_bboxes", [])
         zoom_active = context.get_val("person_zoom_active", False)
