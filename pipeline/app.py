@@ -1,6 +1,7 @@
 import time
 import json
 from datetime import datetime
+from pathlib import Path
 
 import streamlit as st
 from config import OUTPUT_DIR
@@ -18,6 +19,56 @@ postprocessors.discover("postprocessing")
 
 st.set_page_config(layout="wide", page_title="Matting Pipeline Lab")
 st.title("Background matting pipeline")
+
+# ── Config Import ──────────────────────────────────────────────────────────────
+with st.sidebar.expander("Import Config", expanded=False):
+    uploaded_config = st.file_uploader("Upload config.json", type="json")
+    if uploaded_config is not None:
+        try:
+            config_to_apply = json.load(uploaded_config)
+            
+            # Basic keys
+            if "model_name" in config_to_apply:
+                st.session_state["model_select"] = config_to_apply["model_name"]
+            if "weights_path" in config_to_apply:
+                st.session_state["weights_path"] = config_to_apply["weights_path"]
+            
+            # Video matching
+            if "video_source" in config_to_apply:
+                from core.video_io import list_videos
+                from config import VIDEO_DIR
+                source_name = Path(config_to_apply["video_source"]).name
+                for v in list_videos(VIDEO_DIR):
+                    if v.name == source_name:
+                        st.session_state["video_select"] = v
+                        break
+
+            # Model params
+            if "model_params" in config_to_apply:
+                for k, v in config_to_apply["model_params"].items():
+                    st.session_state[f"model_{k}"] = v
+            
+            # Preprocessors
+            if "preprocessors" in config_to_apply:
+                names = [p[0] for p in config_to_apply["preprocessors"]]
+                st.session_state["pre_select"] = names
+                # Inject params for each
+                for i, (name, params) in enumerate(config_to_apply["preprocessors"]):
+                    for pk, pv in params.items():
+                        st.session_state[f"pre_{i}_{pk}"] = pv
+            
+            # Postprocessors
+            if "postprocessors" in config_to_apply:
+                names = [p[0] for p in config_to_apply["postprocessors"]]
+                st.session_state["post_select"] = names
+                for i, (name, params) in enumerate(config_to_apply["postprocessors"]):
+                    for pk, pv in params.items():
+                        st.session_state[f"post_{i}_{pk}"] = pv
+            
+            st.success("Configuration chargée ! L'interface a été mise à jour.")
+        except Exception as e:
+            st.error(f"Erreur lors de l'import : {e}")
+
 st.caption(
     "Configure the pipeline in the sidebar (model, pre/postprocessors), "
     "then inspect results frame-by-frame or export the full video."
