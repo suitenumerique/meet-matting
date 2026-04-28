@@ -42,6 +42,41 @@ class MediapipeSelfieMulticlass(MattingModel):
                 label="Use GPU",
                 help="Use GPU acceleration (Metal on macOS).",
             ),
+            ParameterSpec(
+                name="include_hair",
+                type="bool",
+                default=True,
+                label="Inclure Cheveux",
+                help="Inclure les cheveux dans le masque final.",
+            ),
+            ParameterSpec(
+                name="include_body_skin",
+                type="bool",
+                default=True,
+                label="Inclure Peau (Corps)",
+                help="Inclure la peau du corps dans le masque final.",
+            ),
+            ParameterSpec(
+                name="include_face_skin",
+                type="bool",
+                default=True,
+                label="Inclure Peau (Visage)",
+                help="Inclure la peau du visage dans le masque final.",
+            ),
+            ParameterSpec(
+                name="include_clothes",
+                type="bool",
+                default=True,
+                label="Inclure Vêtements",
+                help="Inclure les vêtements dans le masque final.",
+            ),
+            ParameterSpec(
+                name="include_others",
+                type="bool",
+                default=True,
+                label="Inclure Autres (Accessoires)",
+                help="Inclure les accessoires et autres éléments dans le masque final.",
+            ),
         ]
 
     def load(self, weights_path: str | None = None):
@@ -82,9 +117,22 @@ class MediapipeSelfieMulticlass(MattingModel):
         
         result = self._segmenter.segment(mp_image)
         
-        # Category mask: 0=bg, 1=hair, 2=body, 3=face, 4=clothes, 5=skin
+        # Category mask values:
+        # 0: bg, 1: hair, 2: body-skin, 3: face-skin, 4: clothes, 5: others
         mask = result.category_mask.numpy_view()
-        # Merge all non-background categories into a person mask
-        person_mask = (mask > 0).astype(np.float32)
+        
+        # Build set of allowed classes
+        allowed = []
+        if self.params.get("include_hair", True): allowed.append(1)
+        if self.params.get("include_body_skin", True): allowed.append(2)
+        if self.params.get("include_face_skin", True): allowed.append(3)
+        if self.params.get("include_clothes", True): allowed.append(4)
+        if self.params.get("include_others", True): allowed.append(5)
+        
+        # Merge selected categories into a person mask
+        if not allowed:
+            person_mask = np.zeros_like(mask, dtype=np.float32)
+        else:
+            person_mask = np.isin(mask, allowed).astype(np.float32)
         
         return person_mask

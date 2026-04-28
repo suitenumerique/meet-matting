@@ -23,6 +23,7 @@ class PersonZoom(Preprocessor):
         super().__init__(**params)
         self.detector = PersonDetector()
         self.last_bboxes = []
+        self._smoothed_state = []  # List of [x1, y1, x2, y2] as floats
         self.frame_count = 0
 
     @classmethod
@@ -46,10 +47,29 @@ class PersonZoom(Preprocessor):
                 label="Intervalle de rafraîchissement",
                 help="Nombre de frames entre chaque détection (1 = à chaque frame).",
             ),
+            ParameterSpec(
+                name="smoothing",
+                type="float",
+                default=0.3,
+                min_value=0.05,
+                max_value=1.0,
+                label="Lissage Temporel (EMA)",
+                help="Facteur de lissage (Alpha). Plus bas = plus stable mais plus lent. 1.0 = désactivé.",
+            ),
+            ParameterSpec(
+                name="hysteresis",
+                type="float",
+                default=0.1,
+                min_value=0.0,
+                max_value=0.5,
+                label="Hystérésis de Taille",
+                help="Seuil de changement de taille (0.1 = 10%). Empêche les micro-changements de taille.",
+            ),
         ]
 
     def reset(self):
         self.last_bboxes = []
+        self._smoothed_state = []
         self.frame_count = 0
 
     def __call__(self, frame: np.ndarray) -> np.ndarray:
@@ -57,12 +77,14 @@ class PersonZoom(Preprocessor):
         context.set_val("person_zoom_active", True)
         
         interval = self.params.get("update_interval", 1)
+        alpha = self.params.get("smoothing", 0.3)
+        hysteresis = self.params.get("hysteresis", 0.1)
         
         # Only run detection every N frames
         if self.frame_count % interval == 0:
             padding = self.params.get("padding", 0.2)
-            # PersonDetector returns [x1, y1, x2, y2]
-            self.last_bboxes = self.detector.detect(frame, padding=padding)
+            raw_bboxes = self.detector.detect(frame, padding=padding)
+            self.last_bboxes = self._update_smoothed_boxes(raw_bboxes, alpha, hysteresis)
         
         self.frame_count += 1
         
@@ -70,3 +92,71 @@ class PersonZoom(Preprocessor):
         context.set_val("person_bboxes", self.last_bboxes)
 
         return frame
+
+    def _update_smoothed_boxes(self, raw_bboxes, alpha, hysteresis):
+        """Apply EMA and Hysteresis to raw detections."""
+        if not self._smoothed_state or not raw_bboxes:
+            self._smoothed_state = [[float(c) for c in b] for b in raw_bboxes]
+            return [list(b) for b in raw_bboxes]
+
+        new_state = []
+        used_raw = set()
+
+        # Match existing smoothed boxes to new detections
+        for old_box in self._smoothed_state:
+            old_cx = (old_box[0] + old_box[2]) / 2
+            old_cy = (old_box[1] + old_box[3]) / 2
+            
+            best_idx = -1
+            min_dist = float("inf")
+            
+            for i, raw_box in enumerate(raw_bboxes):
+                if i in used_raw:
+                    continue
+                raw_cx = (raw_box[0] + raw_box[2]) / 2
+                raw_cy = (raw_box[1] + raw_box[3]) / 2
+                dist = ((old_cx - raw_cx)**2 + (old_cy - raw_cy)**2)**0.5
+                
+                # Threshold for matching: 30% of the diagonal of the box
+                diag = ((raw_box[2]-raw_box[0])**2 + (raw_box[3]-raw_box[1])**2)**0.5
+                if dist < min_dist and dist < diag * 0.5:
+                    min_dist = dist
+                    best_idx = i
+            
+            if best_idx != -1:
+                raw_box = raw_bboxes[best_idx]
+                used_raw.add(best_idx)
+                
+                # 1. EMA Smoothing on coordinates
+                smoothed = [
+                    old_box[i] * (1 - alpha) + raw_box[i] * alpha
+                    for i in range(4)
+                ]
+                
+                # 2. Hysteresis on size to prevent "pumping"
+                old_w = old_box[2] - old_box[0]
+                old_h = old_box[3] - old_box[1]
+                new_w = smoothed[2] - smoothed[0]
+                new_h = smoothed[3] - smoothed[1]
+                
+                # If size change is small, preserve old size but keep new center
+                if abs(new_w - old_w) / max(old_w, 1) < hysteresis:
+                    cx = (smoothed[0] + smoothed[2]) / 2
+                    smoothed[0] = cx - old_w / 2
+                    smoothed[2] = cx + old_w / 2
+                
+                if abs(new_h - old_h) / max(old_h, 1) < hysteresis:
+                    cy = (smoothed[1] + smoothed[3]) / 2
+                    smoothed[1] = cy - old_h / 2
+                    smoothed[3] = cy + old_h / 2
+                    
+                new_state.append(smoothed)
+            # If not matched, the person probably left the frame (we drop the box)
+
+        # New detections that weren't matched
+        for i, raw_box in enumerate(raw_bboxes):
+            if i not in used_raw:
+                new_state.append([float(c) for c in raw_box])
+
+        self._smoothed_state = new_state
+        return [[int(c) for c in b] for b in new_state]
