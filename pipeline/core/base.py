@@ -12,6 +12,10 @@ class Component(ABC):
 
     name: str
     description: str
+    details: str = ""  # optional multi-line explanation shown in the sidebar UI
+
+    def reset(self) -> None:  # noqa: B027
+        """Reset any internal state. Optional hook — subclasses override if needed."""
 
     def __init__(self, **params):
         """Store params after validating that all required keys are present.
@@ -33,10 +37,6 @@ class Component(ABC):
     @abstractmethod
     def parameter_specs(cls) -> list[ParameterSpec]:
         """Return the list of ParameterSpec objects that describe this component's parameters."""
-
-    def reset(self):
-        """Reset state of the component. Default implementation does nothing."""
-        pass
 
 
 class Preprocessor(Component, ABC):
@@ -66,6 +66,14 @@ class MattingModel(Component, ABC):
         infer receives: np.ndarray, shape (H, W, 3), dtype uint8, RGB.
         infer returns:  np.ndarray, shape (H, W),   dtype float32, range [0, 1].
     """
+
+    upsampler = None  # set by app.py after instantiation
+
+    def _apply_upsampler(self, mask: np.ndarray, guide: np.ndarray) -> np.ndarray:
+        """Apply self.upsampler if one is set, otherwise return mask unchanged."""
+        if self.upsampler is not None:
+            return self.upsampler.upsample(mask, guide)
+        return mask
 
     @abstractmethod
     def load(self, weights_path: str | None) -> None:
@@ -111,4 +119,50 @@ class Postprocessor(Component, ABC):
 
         Returns:
             Refined alpha matte, shape (H, W), dtype float32, range [0, 1].
+        """
+
+
+class SkipStrategy(Component, ABC):
+    """Produces a mask for a frame that was not sent through the model.
+
+    Data contract:
+        __call__ receives:
+            current_frame: np.ndarray, shape (H, W, 3), dtype uint8, RGB — frame to fill.
+            prev_frame:    np.ndarray, shape (H, W, 3), dtype uint8, RGB — last inferred frame.
+            prev_mask:     np.ndarray, shape (H, W),   dtype float32, range [0, 1].
+        __call__ returns:
+            np.ndarray, shape (H, W), dtype float32, range [0, 1].
+    """
+
+    @abstractmethod
+    def __call__(
+        self,
+        current_frame: np.ndarray,
+        prev_frame: np.ndarray,
+        prev_mask: np.ndarray,
+    ) -> np.ndarray: ...
+
+
+class UpsamplingMethod(Component, ABC):
+    """Upsamples a low-resolution mask to the resolution of a high-resolution guide image.
+
+    Data contract:
+        upsample receives:
+            low_res_mask: np.ndarray, shape (H_l, W_l), dtype float32, range [0, 1].
+            guide:        np.ndarray, shape (H_h, W_h, 3), dtype uint8, RGB.
+        upsample returns:
+            np.ndarray, shape (H_h, W_h), dtype float32, range [0, 1].
+    """
+
+    @abstractmethod
+    def upsample(self, low_res_mask: np.ndarray, guide: np.ndarray) -> np.ndarray:
+        """Upsample *low_res_mask* to the resolution of *guide*.
+
+        Args:
+            low_res_mask: Alpha matte, shape (H_l, W_l), dtype float32, range [0, 1].
+            guide:        Full-resolution RGB frame used as upsampling guidance,
+                          shape (H_h, W_h, 3), dtype uint8.
+
+        Returns:
+            Upsampled alpha matte, shape (H_h, W_h), dtype float32, range [0, 1].
         """

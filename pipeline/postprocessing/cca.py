@@ -9,6 +9,7 @@ from core.base import Postprocessor
 from core.parameters import ParameterSpec
 from core.registry import postprocessors
 
+
 @postprocessors.register
 class ConnectedComponents(Postprocessor):
     name = "cca"
@@ -39,16 +40,16 @@ class ConnectedComponents(Postprocessor):
         # Convert to u8 for OpenCV
         m_u8 = (mask * 255).astype(np.uint8)
         num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(m_u8)
-        
+
         if num_labels <= 1:
             return mask
 
         refined_mask = mask.copy()
         total_area = np.sum(mask > 0.1)
-        
+
         for i in range(1, num_labels):
             area = stats[i, cv2.CC_STAT_AREA]
             if area < (total_area * self.params["min_area_ratio"]):
                 refined_mask[labels == i] = 0
-                
+
         return refined_mask

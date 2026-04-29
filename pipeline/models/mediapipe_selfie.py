@@ -97,8 +97,12 @@ class BaseMediapipeSelfie(MattingModel):
                 # Resize to original input size (important for crops!)
                 if mask.shape[:2] != (h_orig, w_orig):
                     mask = cv2.resize(mask, (w_orig, h_orig), interpolation=cv2.INTER_LINEAR)
-                
-                return mask.astype(np.float32)
+
+                mask = mask.astype(np.float32)
+                # Ensure 2D output regardless of numpy_view() shape
+                while mask.ndim > 2:
+                    mask = mask.squeeze(-1)
+                return mask
 
             return np.zeros((h_orig, w_orig), dtype=np.float32)
         except Exception as e:

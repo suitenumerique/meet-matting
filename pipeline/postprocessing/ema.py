@@ -8,6 +8,7 @@ from core.base import Postprocessor
 from core.parameters import ParameterSpec
 from core.registry import postprocessors
 
+
 @postprocessors.register
 class TemporalSmoothing(Postprocessor):
     name = "ema"
@@ -23,11 +24,11 @@ class TemporalSmoothing(Postprocessor):
             ParameterSpec(
                 name="alpha",
                 type="float",
-                default=0.4,
+                default=0.15,
                 label="Smoothing (Alpha)",
-                min_value=0.05,
+                min_value=0.01,
                 max_value=1.0,
-                step=0.05,
+                step=0.01,
                 help="Smoothing factor. Lower = smoother but more lag.",
             ),
         ]
@@ -44,5 +45,5 @@ class TemporalSmoothing(Postprocessor):
         # raw_mask = alpha * current + (1-alpha) * prev
         smoothed = alpha * mask + (1.0 - alpha) * self._prev_mask
         self._prev_mask = smoothed.copy()
-        
+
         return smoothed
