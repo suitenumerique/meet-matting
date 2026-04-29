@@ -10,8 +10,9 @@ import streamlit.components.v1 as components
 
 _LABELS: dict[str, str] = {
     "original":  "Original",
-    "composite": "Composite",
-    "mask":      "Mask",
+    "mask":      "Masque alpha (apres post-process)",
+    "raw":       "Composite brut (sans post-process)",
+    "composite": "Composite final (apres post-process)",
 }
 
 

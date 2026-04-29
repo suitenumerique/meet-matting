@@ -12,6 +12,7 @@ class Component(ABC):
 
     name: str
     description: str
+    details: str = ""  # optional multi-line explanation shown in the sidebar UI
 
     def reset(self) -> None:  # noqa: B027
         """Reset any internal state. Optional hook — subclasses override if needed."""

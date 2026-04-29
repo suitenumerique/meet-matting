@@ -83,6 +83,10 @@ class MattingPipeline:
         else:
             raw_mask = self.model.infer(inference_frame)
 
+        # Normalize mask to 2D (some models return (H, W, 1) or higher rank)
+        while raw_mask.ndim > 2:
+            raw_mask = raw_mask.squeeze(-1)
+
         # 3. Postprocessing
         final_mask = raw_mask.copy()
         for post in self.postprocessors:

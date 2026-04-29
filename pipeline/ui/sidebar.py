@@ -100,6 +100,8 @@ def render_sidebar() -> SidebarSelection:
         for i, name in enumerate(chosen_pre):
             cls = preprocessors.get(name)
             st.markdown(f"**{name}** — {cls.description}")
+            if cls.details:
+                st.caption(cls.details)
             params = render_component_config(cls, key_prefix=f"pre_{i}")
             pre_configs.append((name, params))
 
@@ -124,6 +126,8 @@ def render_sidebar() -> SidebarSelection:
         for i, name in enumerate(chosen_post):
             cls = postprocessors.get(name)
             st.markdown(f"**{name}** — {cls.description}")
+            if cls.details:
+                st.caption(cls.details)
             params = render_component_config(cls, key_prefix=f"post_{i}")
             post_configs.append((name, params))
 

@@ -1,3 +1,4 @@
+import hashlib
 import json
 import time
 from datetime import datetime
@@ -93,11 +94,29 @@ if selection.video_path is None:
     st.info("Drop a video into `data/videos/` to begin.")
     st.stop()
 
-# Build pipeline from selection.
+# Cache model + upsampler in session_state (expensive to reload on every interaction).
+# Pre/post components are rebuilt every run so parameter changes take effect immediately.
+_model_key = hashlib.md5(
+    json.dumps(
+        {
+            "model":       selection.model_name,
+            "model_params": selection.model_params,
+            "weights":     selection.weights_path,
+            "upsampler":   selection.upsampler,
+        },
+        sort_keys=True,
+        default=str,
+    ).encode()
+).hexdigest()
+if st.session_state.get("_model_key") != _model_key:
+    _m = models.get(selection.model_name)(**selection.model_params)
+    _m.upsampler = upsamplers.get(selection.upsampler[0])(**selection.upsampler[1])
+    _m.load(selection.weights_path)
+    st.session_state["_model"] = _m
+    st.session_state["_model_key"] = _model_key
+
+model = st.session_state["_model"]
 pre_components = [preprocessors.get(name)(**params) for name, params in selection.preprocessors]
-model = models.get(selection.model_name)(**selection.model_params)
-model.upsampler = upsamplers.get(selection.upsampler[0])(**selection.upsampler[1])
-model.load(selection.weights_path)  # may be None
 post_components = [postprocessors.get(name)(**params) for name, params in selection.postprocessors]
 pipeline = MattingPipeline(pre_components, model, post_components, bg_color=selection.bg_color)
 
@@ -115,7 +134,13 @@ col_slider, col_fps = st.columns([4, 1])
 with col_slider:
     idx = st.slider("Frame", 0, max(total - 1, 0), 0)
 
-# Run inference and measure FPS
+# Warm up stateful filters (EMA, 1-Euro, Kalman, median) by replaying the
+# preceding WARMUP frames silently before displaying frame idx.
+# Without this, filters always show cold-start behaviour (= raw mask unchanged).
+_WARMUP = 10
+for _w in range(max(0, idx - _WARMUP), idx):
+    pipeline.process_frame(read_frame(selection.video_path, _w))
+
 frame = read_frame(selection.video_path, idx)
 t0 = time.time()
 result = pipeline.process_frame(frame)
@@ -185,20 +210,6 @@ if run_clicked:
     progress_bar.progress(1.0)
     status.empty()
     st.success(f"Saved to `{run_dir.relative_to(OUTPUT_DIR.parent)}`")
-
-    col_m, col_c = st.columns(2)
-    with col_m:
-        st.caption("Mask — alpha matte (white = foreground)")
-        if paths["mask"].exists():
-            st.video(paths["mask"].read_bytes())
-        else:
-            st.error("Fichier masque introuvable.")
-    with col_c:
-        st.caption("Composite — subject on black background")
-        if paths["composite"].exists():
-            st.video(paths["composite"].read_bytes())
-        else:
-            st.error("Fichier composite introuvable.")
     display_synced_player(paths)
 
 st.divider()
@@ -228,18 +239,9 @@ with st.expander("Browse saved outputs", expanded=False):
                         conf = json.load(f)
                     st.json(conf)
 
-                col_m, col_c = st.columns(2)
-                with col_m:
-                    mask_file = run_dir / "mask.mp4"
-                    if mask_file.exists():
-                        st.caption("Mask — alpha matte (white = foreground)")
-                        st.video(mask_file.read_bytes())
-                    else:
-                        st.info("mask.mp4 not found.")
-                with col_c:
-                    comp_file = run_dir / "composite.mp4"
-                    if comp_file.exists():
-                        st.caption("Composite — subject on black background")
-                        st.video(comp_file.read_bytes())
-                    else:
-                        st.info("composite.mp4 not found.")
+                display_synced_player({
+                    "original":  run_dir / "original.mp4",
+                    "mask":      run_dir / "mask.mp4",
+                    "raw":       run_dir / "raw.mp4",
+                    "composite": run_dir / "composite.mp4",
+                })
