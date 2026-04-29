@@ -147,14 +147,18 @@ class PPHumanSegV2(MattingModel):
             mask_up = cv2.resize(mask_low, (w, h), interpolation=cv2.INTER_LINEAR)
 
         if self.params["use_refinement"]:
-            # frame is RGB but guidedFilter only needs luminance structure — BGR order doesn't matter
             frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-            mask_up = cv2.ximgproc.guidedFilter(
-                guide=frame_bgr,
-                src=mask_up,
-                radius=self.params["refine_radius"],
-                eps=self.params["refine_eps"],
-            )
+            if hasattr(cv2, "ximgproc") and hasattr(cv2.ximgproc, "guidedFilter"):
+                mask_up = cv2.ximgproc.guidedFilter(
+                    guide=frame_bgr,
+                    src=mask_up,
+                    radius=self.params["refine_radius"],
+                    eps=self.params["refine_eps"],
+                )
+            else:
+                # Fallback: bilateral filter (edge-preserving, no opencv-contrib needed)
+                d = self.params["refine_radius"] * 2 + 1
+                mask_up = cv2.bilateralFilter(mask_up, d, 75, 75)
 
         # Soft contrast stretch matching benchmark post-processing
         mask = np.clip((mask_up - 0.45) / (0.55 - 0.45), 0.0, 1.0)

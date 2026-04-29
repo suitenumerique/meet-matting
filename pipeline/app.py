@@ -1,5 +1,5 @@
 import os
-os.environ["OPENCV_AVFOUNDATION_SKIP_AUTH"] = "1"
+os.environ["OPENCV_AVFOUNDATION_SKIP_AUTH"] = "0"
 
 import time
 import hashlib
@@ -239,106 +239,174 @@ with tab_live:
     st.subheader("Démo en temps réel")
     col_ctrl, col_stats = st.columns([3, 1])
     with col_ctrl:
-        c1, c2 = st.columns(2)
+        c1, c2, c3 = st.columns(3)
         with c1:
-            bg_mode = st.selectbox("Arrière-plan", ["Original", "Noir", "Flou (Portrait)", "Bureau Moderne", "Nature"], index=0)
+            bg_mode = st.selectbox(
+                "Arrière-plan",
+                ["Couleur sidebar", "Noir", "Flou (Portrait)", "Bureau Moderne", "Nature"],
+                index=0,
+            )
         with c2:
             live_skip = st.number_input("Skip Frames (Live)", min_value=1, value=1)
+        with c3:
+            show_panels = st.checkbox("Vue 4 panneaux", value=False)
     with col_stats:
         fps_placeholder = st.empty()
-    
+        inf_placeholder = st.empty()
+
     run_cam = st.toggle("Démarrer la caméra", value=False)
-    
+    cam_status = st.empty()
+
     if run_cam:
+        pipeline.reset()
+
+        # Try opening camera — with AVFOUNDATION backend on macOS, then fallback
         cap = cv2.VideoCapture(0, cv2.CAP_AVFOUNDATION)
-        cap.set(cv2.CAP_PROP_FPS, 60)
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
-        
-        st_frame = st.empty()
-        st_debug = st.empty()
-        
-        bg_cache = {}
-        bg_resized_cache = {}
+        if not cap.isOpened():
+            cap.release()
+            cap = cv2.VideoCapture(0)
 
-        def get_bg(mode, w, h):
-            if mode not in bg_cache:
-                if mode == "Bureau Moderne":
-                    url = "https://images.unsplash.com/photo-1497366216548-37526070297c?auto=format&fit=crop&w=1280&q=80"
-                elif mode == "Nature":
-                    url = "https://images.unsplash.com/photo-1441974231531-c6227db76b6e?auto=format&fit=crop&w=1280&q=80"
-                else: return None
-                try:
-                    resp = urllib.request.urlopen(url)
-                    img = cv2.imdecode(np.asarray(bytearray(resp.read()), dtype="uint8"), 1)
-                    bg_cache[mode] = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-                except: return None
-            
-            key = (mode, w, h)
-            if key not in bg_resized_cache:
-                bg_resized_cache[key] = cv2.resize(bg_cache[mode], (w, h))
-            return bg_resized_cache[key]
+        if not cap.isOpened():
+            cam_status.error(
+                "❌ Impossible d'ouvrir la caméra (index 0). "
+                "Sur macOS : Réglages système → Confidentialité et sécurité → Caméra "
+                "→ autorisez l'accès pour Terminal ou l'app Python."
+            )
+        else:
+            cap.set(cv2.CAP_PROP_FPS, 30)
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
 
-        idx = 0
-        last_mask = None
-        fps_history = []
-        inf_history = []
-        
-        while run_cam:
-            loop_start = time.time()
-            ret, bgr = cap.read()
-            if not ret: break
-            rgb_full = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-            h_full, w_full = rgb_full.shape[:2]
-            
-            disp_w = 640
-            scale = disp_w / w_full
-            disp_h = int(h_full * scale)
-            rgb = cv2.resize(rgb_full, (disp_w, disp_h))
-            
-            inf_start = time.time()
-            inf_ran = False
-            if bg_mode != "Original":
-                if idx % live_skip == 0 or last_mask is None:
-                    res = pipeline.process_frame(rgb_full)
-                    last_mask_full = res.get("final_mask", res.get("mask"))
-                    if last_mask_full is None:
-                        last_mask_full = np.ones((h_full, w_full), dtype=np.float32)
-                    last_mask = cv2.resize(last_mask_full, (disp_w, disp_h))
-                    inf_ran = True
-                
-                m3d = last_mask[:, :, np.newaxis]
-            
-            if inf_ran:
-                inf_history.append(time.time() - inf_start)
-                if len(inf_history) > 30: inf_history.pop(0)
-            
-            if bg_mode == "Original":
-                final = rgb
-            elif bg_mode == "Noir": 
-                final = (rgb * m3d).astype(np.uint8)
-            elif bg_mode == "Flou (Portrait)":
-                small = cv2.resize(rgb, (disp_w//4, disp_h//4))
-                small_blur = cv2.GaussianBlur(small, (15, 15), 0)
-                blurred = cv2.resize(small_blur, (disp_w, disp_h))
-                final = (rgb * m3d + blurred * (1 - m3d)).astype(np.uint8)
+            # Warm up: discard first few frames (camera auto-exposure)
+            for _ in range(3):
+                cap.read()
+
+            ret_test, bgr_test = cap.read()
+            if not ret_test:
+                cam_status.error(
+                    "❌ La caméra s'est ouverte mais ne retourne pas de frame. "
+                    "Vérifiez qu'elle n'est pas utilisée par une autre application."
+                )
+                cap.release()
             else:
-                curr_bg = get_bg(bg_mode, disp_w, disp_h)
-                if curr_bg is not None:
-                    final = (rgb * m3d + curr_bg * (1 - m3d)).astype(np.uint8)
-                else:
-                    final = (rgb * m3d).astype(np.uint8)
+                cam_status.success("✅ Caméra ouverte — flux en cours...")
 
-            st_frame.image(final, channels="RGB", use_container_width=True, output_format="JPEG")
-            fps_history.append(time.time() - loop_start)
-            if len(fps_history) > 30: fps_history.pop(0)
-            
-            idx += 1
-            if idx % 5 == 0:
-                avg_loop = sum(fps_history) / len(fps_history)
-                avg_inf = sum(inf_history) / len(inf_history) if inf_history else 0
-                current_fps = 1.0 / avg_loop if avg_loop > 0 else 0
-                fps_placeholder.metric("Live FPS", f"{current_fps:.1f}")
-                st_debug.caption(f"IA: {avg_inf*1000:.1f}ms | Boucle: {avg_loop*1000:.1f}ms")
-                
-        cap.release()
+                if show_panels:
+                    col_a, col_b = st.columns(2)
+                    col_c, col_d = st.columns(2)
+                    ph_orig = col_a.empty()
+                    ph_final = col_b.empty()
+                    ph_raw = col_c.empty()
+                    ph_fin_mask = col_d.empty()
+                else:
+                    ph_final = st.empty()
+
+                st_debug = st.empty()
+
+                bg_cache: dict = {}
+                bg_resized_cache: dict = {}
+
+                def get_bg(mode: str, w: int, h: int):
+                    if mode not in bg_cache:
+                        urls = {
+                            "Bureau Moderne": "https://images.unsplash.com/photo-1497366216548-37526070297c?auto=format&fit=crop&w=1280&q=80",
+                            "Nature": "https://images.unsplash.com/photo-1441974231531-c6227db76b6e?auto=format&fit=crop&w=1280&q=80",
+                        }
+                        url = urls.get(mode)
+                        if url is None:
+                            return None
+                        try:
+                            resp = urllib.request.urlopen(url)
+                            img = cv2.imdecode(np.asarray(bytearray(resp.read()), dtype="uint8"), 1)
+                            bg_cache[mode] = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                        except Exception:
+                            return None
+                    key = (mode, w, h)
+                    if key not in bg_resized_cache:
+                        bg_resized_cache[key] = cv2.resize(bg_cache[mode], (w, h))
+                    return bg_resized_cache[key]
+
+                DISP_W = 640
+                idx = 0
+                last_result: dict | None = None
+                fps_history: list[float] = []
+                inf_history: list[float] = []
+
+                # Inject the first frame we already read above
+                frames_to_process = [bgr_test]
+
+                while True:
+                    loop_start = time.time()
+
+                    if frames_to_process:
+                        bgr = frames_to_process.pop(0)
+                    else:
+                        ret, bgr = cap.read()
+                        if not ret:
+                            cam_status.warning(f"⚠️ Lecture caméra échouée à la frame {idx}.")
+                            break
+
+                    rgb_full = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+                    h_full, w_full = rgb_full.shape[:2]
+                    disp_h = int(h_full * DISP_W / w_full)
+                    rgb_disp = cv2.resize(rgb_full, (DISP_W, disp_h))
+
+                    # Always run the full pipeline (pre + model + post)
+                    if idx % live_skip == 0 or last_result is None:
+                        try:
+                            inf_start = time.time()
+                            last_result = pipeline.process_frame(rgb_full)
+                            inf_history.append(time.time() - inf_start)
+                            if len(inf_history) > 30:
+                                inf_history.pop(0)
+                        except Exception as exc:
+                            cam_status.error(f"⚠️ Erreur pipeline : {exc}")
+                            # Show raw frame so the user sees something
+                            ph_final.image(rgb_disp, channels="RGB", use_container_width=True, output_format="JPEG")
+                            idx += 1
+                            fps_history.append(time.time() - loop_start)
+                            continue
+
+                    result = last_result
+                    final_mask = cv2.resize(result["final_mask"], (DISP_W, disp_h))
+                    m3d = final_mask[:, :, np.newaxis]
+
+                    if bg_mode == "Couleur sidebar":
+                        final = cv2.resize(result["final"], (DISP_W, disp_h))
+                    elif bg_mode == "Noir":
+                        final = (rgb_disp * m3d).astype(np.uint8)
+                    elif bg_mode == "Flou (Portrait)":
+                        small = cv2.resize(rgb_disp, (DISP_W // 4, disp_h // 4))
+                        blurred = cv2.resize(cv2.GaussianBlur(small, (15, 15), 0), (DISP_W, disp_h))
+                        final = (rgb_disp * m3d + blurred * (1.0 - m3d)).astype(np.uint8)
+                    else:
+                        curr_bg = get_bg(bg_mode, DISP_W, disp_h)
+                        if curr_bg is not None:
+                            final = (rgb_disp * m3d + curr_bg * (1.0 - m3d)).astype(np.uint8)
+                        else:
+                            final = (rgb_disp * m3d).astype(np.uint8)
+
+                    if show_panels:
+                        ph_orig.image(rgb_disp, caption="Original", use_container_width=True, output_format="JPEG")
+                        ph_final.image(final, channels="RGB", caption="Composite", use_container_width=True, output_format="JPEG")
+                        raw_uint8 = (cv2.resize(result["raw_mask"], (DISP_W, disp_h)) * 255).astype(np.uint8)
+                        ph_raw.image(raw_uint8, caption="Masque brut", use_container_width=True, output_format="JPEG")
+                        fin_uint8 = (final_mask * 255).astype(np.uint8)
+                        ph_fin_mask.image(fin_uint8, caption="Masque final (post-proc)", use_container_width=True, output_format="JPEG")
+                    else:
+                        ph_final.image(final, channels="RGB", use_container_width=True, output_format="JPEG")
+
+                    fps_history.append(time.time() - loop_start)
+                    if len(fps_history) > 30:
+                        fps_history.pop(0)
+
+                    idx += 1
+                    if idx % 5 == 0:
+                        avg_loop = sum(fps_history) / len(fps_history)
+                        avg_inf = sum(inf_history) / len(inf_history) if inf_history else 0
+                        fps_placeholder.metric("Live FPS", f"{1.0 / avg_loop:.1f}" if avg_loop > 0 else "—")
+                        inf_placeholder.metric("Inférence", f"{avg_inf * 1000:.0f} ms")
+                        st_debug.caption(f"Frame {idx} | Inférence: {avg_inf*1000:.1f}ms | Boucle: {avg_loop*1000:.1f}ms")
+
+                cap.release()
+                cam_status.info("Caméra arrêtée.")
