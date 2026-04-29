@@ -127,167 +127,113 @@ pipeline = MattingPipeline(pre_components, model, post_components, bg_color=sele
 tab_lab, tab_live = st.tabs(["📽️ Laboratoire Vidéo", "📸 Test Caméra"])
 
 with tab_lab:
-    if selection.video_path is None:
-        st.info("Ajoutez une vidéo dans `data/videos/` pour commencer.")
-# ── Frame preview ──────────────────────────────────────────────────────────────
-st.subheader("Frame preview")
-st.caption(
-    "Drag the slider to inspect any frame. "
-    "The four panels show each stage of the pipeline: "
-    "original → after preprocessing → raw model mask → final composite. "
-    "Note: the final composite is always blended onto the **original** frame, "
-    "so preprocessing changes are visible in the mask panel but not the composite."
-)
-total = frame_count(selection.video_path)
-col_slider, col_fps = st.columns([4, 1])
-with col_slider:
-    idx = st.slider("Frame", 0, max(total - 1, 0), 0)
-
-# Warm up stateful filters (EMA, 1-Euro, Kalman, median) by replaying the
-# preceding WARMUP frames silently before displaying frame idx.
-# Without this, filters always show cold-start behaviour (= raw mask unchanged).
-_WARMUP = 10
-for _w in range(max(0, idx - _WARMUP), idx):
-    pipeline.process_frame(read_frame(selection.video_path, _w))
-
-frame = read_frame(selection.video_path, idx)
-t0 = time.time()
-result = pipeline.process_frame(frame)
-t1 = time.time()
-fps = 1.0 / max(t1 - t0, 0.001)
-
-with col_fps:
-    st.metric("Inference FPS", f"{fps:.1f}")
-
-display_four_panels(result)
-
-st.divider()
-
-# ── Export full video ──────────────────────────────────────────────────────────
-st.subheader("Export full video")
-skip_frames = selection.skip_frames
-st.caption(
-    "Runs the full pipeline on every frame and saves results to `data/output/`. "
-    "Configure skip frames and strategy in the sidebar."
-)
-
-col_btn, col_info = st.columns([1, 3])
-with col_btn:
-    run_clicked = st.button("Process & save", type="primary", use_container_width=True)
-with col_info:
-    frames_to_process = (total + skip_frames - 1) // skip_frames
-    strategy_name = selection.skip_strategy[0]
+    # ── Frame preview ──────────────────────────────────────────────────────────
+    st.subheader("Frame preview")
     st.caption(
-        f"Will process **{frames_to_process} frames** (1 every {skip_frames}, "
-        f"strategy: `{strategy_name}`) with model `{selection.model_name}`."
+        "Drag the slider to inspect any frame. "
+        "The four panels show each stage of the pipeline: "
+        "original → after preprocessing → raw model mask → final composite. "
     )
+    total = frame_count(selection.video_path)
+    col_slider, col_fps = st.columns([4, 1])
+    with col_slider:
+        idx = st.slider("Frame", 0, max(total - 1, 0), 0)
 
-if run_clicked:
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_dir = OUTPUT_DIR / f"{selection.video_path.stem}__{selection.model_name}__{timestamp}"
-    run_dir.mkdir(parents=True, exist_ok=True)
+    # Warm up stateful filters
+    _WARMUP = 10
+    for _w in range(max(0, idx - _WARMUP), idx):
+        pipeline.process_frame(read_frame(selection.video_path, _w))
 
-    config_data = {
-        "timestamp": timestamp,
-        "video_source": str(selection.video_path),
-        "model_name": selection.model_name,
-        "model_params": selection.model_params,
-        "preprocessors": selection.preprocessors,
-        "postprocessors": selection.postprocessors,
-        "skip_frames": skip_frames,
-        "skip_strategy": selection.skip_strategy,
-    }
-    with open(run_dir / "config.json", "w") as f:
-        json.dump(config_data, f, indent=4)
+    frame = read_frame(selection.video_path, idx)
+    t0 = time.time()
+    result = pipeline.process_frame(frame)
+    fps = 1.0 / max(time.time() - t0, 0.001)
 
-    pipeline.reset()
+    with col_fps:
+        st.metric("Inference FPS", f"{fps:.1f}")
 
-    strategy_name, strategy_params = selection.skip_strategy
-    strategy_instance = skip_strategies.get(strategy_name)(**strategy_params)
+    display_four_panels(result)
+    st.divider()
 
-    progress_bar = st.progress(0.0)
-    status = st.empty()
+    # ── Export full video ──────────────────────────────────────────────────────
+    st.subheader("Export full video")
+    skip_frames = selection.skip_frames
+    st.caption("Runs the full pipeline on every frame and saves results to `data/output/`.")
 
-    def _on_progress(done: int, total_frames: int, current_fps: float) -> None:
-        progress_bar.progress(done / max(total_frames, 1))
-        status.caption(f"Frame {done} / {total_frames} | {current_fps:.1f} FPS")
+    col_btn, col_info = st.columns([1, 3])
+    with col_btn:
+        run_clicked = st.button("Process & save", type="primary", use_container_width=True)
+    with col_info:
+        frames_to_process = (total + skip_frames - 1) // skip_frames
+        strategy_name = selection.skip_strategy[0]
+        st.caption(f"Processing **{frames_to_process} frames** (Skip: {skip_frames}, Strategy: `{strategy_name}`).")
 
-    with st.spinner("Processing video..."):
-        paths = process_video(
-            pipeline,
-            selection.video_path,
-            run_dir,
-            _on_progress,
-            skip_frames=skip_frames,
-            skip_strategy=strategy_instance,
-        )
+    if run_clicked:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        run_dir = OUTPUT_DIR / f"{selection.video_path.stem}__{selection.model_name}__{timestamp}"
+        run_dir.mkdir(parents=True, exist_ok=True)
 
-    progress_bar.progress(1.0)
-    status.empty()
-    st.success(f"Saved to `{run_dir.relative_to(OUTPUT_DIR.parent)}`")
-    display_synced_player(paths)
+        config_data = {
+            "timestamp": timestamp,
+            "video_source": str(selection.video_path),
+            "model_name": selection.model_name,
+            "model_params": selection.model_params,
+            "preprocessors": selection.preprocessors,
+            "postprocessors": selection.postprocessors,
+            "skip_frames": skip_frames,
+            "skip_strategy": selection.skip_strategy,
+        }
+        with open(run_dir / "config.json", "w") as f:
+            json.dump(config_data, f, indent=4)
 
-st.divider()
+        pipeline.reset()
+        strategy_name, strategy_params = selection.skip_strategy
+        strategy_instance = skip_strategies.get(strategy_name)(**strategy_params)
 
-# ── Browse saved outputs ───────────────────────────────────────────────────────
-with st.expander("Browse saved outputs", expanded=False):
-    st.caption("Replay any previously exported run. Runs are listed newest-first.")
-    if not OUTPUT_DIR.exists() or not any(OUTPUT_DIR.iterdir()):
-        st.info("No saved runs yet. Process a video above to create one.")
-    else:
-        st.subheader(f"Aperçu : {selection.video_path.name}")
-        col_slider, col_fps = st.columns([4, 1])
-        total = frame_count(selection.video_path)
-        with col_slider:
-            idx = st.slider("Frame", 0, max(total - 1, 0), 0)
-        
-        frame = read_frame(selection.video_path, idx)
-        t0 = time.time()
-        result = pipeline.process_frame(frame)
-        fps = 1.0 / max(time.time() - t0, 0.001)
-        
-        with col_fps:
-            st.metric("Inference FPS", f"{fps:.1f}")
-        
-        display_four_panels(result)
-        st.divider()
+        progress_bar = st.progress(0.0)
+        status = st.empty()
 
-        # Export Logic
-        st.subheader("Exporter la vidéo")
-        col_skip, col_btn = st.columns([1, 1])
-        with col_skip:
-            skip_frames = st.number_input("Skip Frames", min_value=1, value=1)
-        with col_btn:
-            st.write("") # Spacer
-            run_clicked = st.button("Lancer l'export", type="primary", use_container_width=True)
+        def _on_progress(done, total_f, current_fps):
+            progress_bar.progress(done / max(total_f, 1))
+            status.caption(f"Frame {done} / {total_f} | {current_fps:.1f} FPS")
 
-        if run_clicked:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            run_dir = OUTPUT_DIR / f"{selection.video_path.stem}__{selection.model_name}__{timestamp}"
-            run_dir.mkdir(parents=True, exist_ok=True)
-            
-            # Save config
-            config_data = {
-                "timestamp": timestamp, "video_source": str(selection.video_path),
-                "model_name": selection.model_name, "model_params": selection.model_params,
-                "preprocessors": selection.preprocessors, "postprocessors": selection.postprocessors,
-                "skip_frames": skip_frames,
-            }
-            with open(run_dir / "config.json", "w") as f: json.dump(config_data, f, indent=4)
+        with st.spinner("Processing video..."):
+            paths = process_video(
+                pipeline, selection.video_path, run_dir, _on_progress,
+                skip_frames=skip_frames, skip_strategy=strategy_instance
+            )
 
-            progress_bar = st.progress(0.0)
-            status = st.empty()
-            def _on_progress(d, t, f):
-                progress_bar.progress(d / max(t, 1))
-                status.caption(f"Frame {d}/{t} | {f:.1f} FPS")
+        st.success(f"Saved to `{run_dir.name}`")
+        display_synced_player(paths)
 
-            with st.spinner("Export en cours..."):
-                paths = process_video(pipeline, selection.video_path, run_dir, _on_progress, skip_frames=skip_frames)
-            
-            st.success(f"Sauvegardé dans `{run_dir.name}`")
-            col_m, col_c = st.columns(2)
-            with col_m: st.video(paths["mask"].read_bytes())
-            with col_c: st.video(paths["composite"].read_bytes())
+    st.divider()
+
+    # ── Browse saved outputs ───────────────────────────────────────────────────
+    with st.expander("Browse saved outputs", expanded=False):
+        if not OUTPUT_DIR.exists():
+            st.info("No saved runs yet.")
+        else:
+            run_dirs = sorted([d for d in OUTPUT_DIR.iterdir() if d.is_dir()], key=lambda d: d.stat().st_mtime, reverse=True)
+            run_names = [d.name for d in run_dirs]
+            if not run_names:
+                st.info("No saved runs yet.")
+            else:
+                selected_run = st.selectbox("Select a run", run_names, key="browse_run_select")
+                rd = OUTPUT_DIR / selected_run
+                conf_p = rd / "config.json"
+                if conf_p.exists():
+                    with open(conf_p) as f: st.json(json.load(f))
+                
+                v_paths = {
+                    "original": rd / "original.mp4",
+                    "mask": rd / "mask.mp4",
+                    "raw": rd / "raw.mp4",
+                    "composite": rd / "composite.mp4"
+                }
+                if all(p.exists() for p in v_paths.values()):
+                    display_synced_player(v_paths)
+                else:
+                    st.warning("Video files missing in this run directory.")
 
 with tab_live:
     st.subheader("Démo en temps réel")
@@ -312,9 +258,8 @@ with tab_live:
         st_frame = st.empty()
         st_debug = st.empty()
         
-        # Background Cache to avoid re-downloading and re-resizing
         bg_cache = {}
-        bg_resized_cache = {} # (mode, target_w, target_h) -> img
+        bg_resized_cache = {}
 
         def get_bg(mode, w, h):
             if mode not in bg_cache:
@@ -329,7 +274,6 @@ with tab_live:
                     bg_cache[mode] = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
                 except: return None
             
-            # Check resized cache
             key = (mode, w, h)
             if key not in bg_resized_cache:
                 bg_resized_cache[key] = cv2.resize(bg_cache[mode], (w, h))
@@ -337,7 +281,6 @@ with tab_live:
 
         idx = 0
         last_mask = None
-        # Rolling average for FPS
         fps_history = []
         inf_history = []
         
@@ -348,13 +291,11 @@ with tab_live:
             rgb_full = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
             h_full, w_full = rgb_full.shape[:2]
             
-            # --- 1. PREVIEW RESIZE ---
             disp_w = 640
             scale = disp_w / w_full
             disp_h = int(h_full * scale)
             rgb = cv2.resize(rgb_full, (disp_w, disp_h))
             
-            # --- 2. INFERENCE ---
             inf_start = time.time()
             inf_ran = False
             if bg_mode != "Original":
@@ -372,7 +313,6 @@ with tab_live:
                 inf_history.append(time.time() - inf_start)
                 if len(inf_history) > 30: inf_history.pop(0)
             
-            # --- 3. COMPOSITION ---
             if bg_mode == "Original":
                 final = rgb
             elif bg_mode == "Noir": 
@@ -389,10 +329,7 @@ with tab_live:
                 else:
                     final = (rgb * m3d).astype(np.uint8)
 
-            # --- 4. DISPLAY ---
             st_frame.image(final, channels="RGB", use_container_width=True, output_format="JPEG")
-            
-            # Update FPS
             fps_history.append(time.time() - loop_start)
             if len(fps_history) > 30: fps_history.pop(0)
             
@@ -402,54 +339,6 @@ with tab_live:
                 avg_inf = sum(inf_history) / len(inf_history) if inf_history else 0
                 current_fps = 1.0 / avg_loop if avg_loop > 0 else 0
                 fps_placeholder.metric("Live FPS", f"{current_fps:.1f}")
-                st_debug.caption(f"IA: {avg_inf*1000:.1f}ms | Boucle: {avg_loop*1000:.1f}ms | Skip: {live_skip}")
+                st_debug.caption(f"IA: {avg_inf*1000:.1f}ms | Boucle: {avg_loop*1000:.1f}ms")
                 
         cap.release()
-
-# ── History ──────────────────────────────────────────────────────────────────
-st.divider()
-with st.expander("Historique des exports", expanded=False):
-    if OUTPUT_DIR.exists():
-        runs = sorted([p for p in OUTPUT_DIR.iterdir() if p.is_dir()], reverse=True)
-        if runs:
-            sel_run = st.selectbox("Sélectionner un export", [r.name for r in runs])
-            r_dir = OUTPUT_DIR / sel_run
-            
-            # Afficher config
-            conf_path = r_dir / "config.json"
-            if conf_path.exists():
-                with open(conf_path, "r") as f:
-                    st.json(json.load(f))
-            
-            c1, c2 = st.columns(2)
-            mask_path = r_dir / "mask.mp4"
-            if mask_path.exists():
-                with c1:
-                    st.caption("Masque")
-                    st.video(mask_path.read_bytes())
-            
-            comp_path = r_dir / "composite.mp4"
-            if comp_path.exists():
-                with c2:
-                    st.caption("Composite")
-                    st.video(comp_path.read_bytes())
-        else:
-            selected_run = st.selectbox("Run", run_names, key="browse_run")
-            if selected_run:
-                run_dir = OUTPUT_DIR / selected_run
-
-                # Show config for this run
-                config_file = run_dir / "config.json"
-                if config_file.exists():
-                    with open(config_file) as f:
-                        conf = json.load(f)
-                    st.json(conf)
-
-                display_synced_player(
-                    {
-                        "original": run_dir / "original.mp4",
-                        "mask": run_dir / "mask.mp4",
-                        "raw": run_dir / "raw.mp4",
-                        "composite": run_dir / "composite.mp4",
-                    }
-                )
