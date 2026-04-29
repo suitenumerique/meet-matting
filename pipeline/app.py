@@ -6,7 +6,7 @@ from pathlib import Path
 import streamlit as st
 from config import OUTPUT_DIR
 from core.pipeline import MattingPipeline
-from core.registry import models, postprocessors, preprocessors, upsamplers
+from core.registry import models, postprocessors, preprocessors, skip_strategies, upsamplers
 from core.video_io import frame_count, read_frame
 from core.video_processing import process_video
 from ui.sidebar import render_sidebar
@@ -18,6 +18,7 @@ preprocessors.discover("preprocessing")
 models.discover("models")
 postprocessors.discover("postprocessing")
 upsamplers.discover("upsampling")
+skip_strategies.discover("skip_strategies")
 
 st.set_page_config(layout="wide", page_title="Matting Pipeline Lab")
 st.title("Background matting pipeline")
@@ -131,24 +132,21 @@ st.divider()
 
 # ── Export full video ──────────────────────────────────────────────────────────
 st.subheader("Export full video")
+skip_frames = selection.skip_frames
 st.caption(
     "Runs the full pipeline on every frame and saves results to `data/output/`. "
-    "Use 'Skip Frames' to speed up processing by skipping every N-1 frames."
+    "Configure skip frames and strategy in the sidebar."
 )
 
-col_skip, col_btn, col_info = st.columns([1, 1, 2])
-with col_skip:
-    skip_frames = st.number_input(
-        "Skip Frames", min_value=1, value=1, help="1 = all frames, 2 = every 2nd frame, etc."
-    )
+col_btn, col_info = st.columns([1, 3])
 with col_btn:
-    st.write("")  # Spacer
     run_clicked = st.button("Process & save", type="primary", use_container_width=True)
 with col_info:
     frames_to_process = (total + skip_frames - 1) // skip_frames
+    strategy_name = selection.skip_strategy[0]
     st.caption(
-        f"Will process **{frames_to_process} frames** (1 every {skip_frames}) "
-        f"with model `{selection.model_name}`."
+        f"Will process **{frames_to_process} frames** (1 every {skip_frames}, "
+        f"strategy: `{strategy_name}`) with model `{selection.model_name}`."
     )
 
 if run_clicked:
@@ -164,11 +162,15 @@ if run_clicked:
         "preprocessors": selection.preprocessors,
         "postprocessors": selection.postprocessors,
         "skip_frames": skip_frames,
+        "skip_strategy": selection.skip_strategy,
     }
     with open(run_dir / "config.json", "w") as f:
         json.dump(config_data, f, indent=4)
 
     pipeline.reset()
+
+    strategy_name, strategy_params = selection.skip_strategy
+    strategy_instance = skip_strategies.get(strategy_name)(**strategy_params)
 
     progress_bar = st.progress(0.0)
     status = st.empty()
@@ -179,7 +181,12 @@ if run_clicked:
 
     with st.spinner("Processing video..."):
         paths = process_video(
-            pipeline, selection.video_path, run_dir, _on_progress, skip_frames=skip_frames
+            pipeline,
+            selection.video_path,
+            run_dir,
+            _on_progress,
+            skip_frames=skip_frames,
+            skip_strategy=strategy_instance,
         )
 
     progress_bar.progress(1.0)

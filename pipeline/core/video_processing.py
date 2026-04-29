@@ -1,6 +1,6 @@
 """
 Video processing utilities for running the pipeline on video files.
-Includes support for frame skipping to speed up processing.
+Includes support for frame skipping with pluggable skip strategies.
 """
 
 from __future__ import annotations
@@ -12,6 +12,8 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from core.base import SkipStrategy
+
 
 def process_video(
     pipeline,
@@ -19,6 +21,7 @@ def process_video(
     output_dir: Path,
     on_progress: Callable[[int, int, float], None] | None = None,
     skip_frames: int = 1,
+    skip_strategy: SkipStrategy | None = None,
 ) -> dict[str, Path]:
     """Run *pipeline* on frames of *video_path* and write results to *output_dir*.
 
@@ -28,11 +31,12 @@ def process_video(
         original.mp4  — unprocessed source frames.
 
     Args:
-        pipeline:    A :class:`MattingPipeline` instance (already loaded).
-        video_path:  Path to the source video.
-        output_dir:  Folder that will receive the output videos (created if absent).
-        on_progress: Optional callback called after each frame with (done, total, fps).
-        skip_frames: Process 1 frame every N frames; reuse last mask in between.
+        pipeline:       A :class:`MattingPipeline` instance (already loaded).
+        video_path:     Path to the source video.
+        output_dir:     Folder that will receive the output videos (created if absent).
+        on_progress:    Optional callback called after each frame with (done, total, fps).
+        skip_frames:    Process 1 frame every N frames; use *skip_strategy* in between.
+        skip_strategy:  How to fill skipped frames. Falls back to plain reuse if None.
 
     Returns:
         Dict with keys ``"mask"``, ``"composite"``, and ``"original"``.
@@ -56,6 +60,7 @@ def process_video(
 
     idx = 0
     last_result = None
+    last_frame_rgb = None
     fps_val = orig_fps
 
     try:
@@ -70,9 +75,13 @@ def process_video(
                 iter_start = time.time()
                 last_result = pipeline.process_frame(frame_rgb)
                 fps_val = 1.0 / max(time.time() - iter_start, 0.001)
+                last_frame_rgb = frame_rgb
             else:
-                # Reuse last mask but re-composite onto the current frame
-                mask = last_result["final_mask"]
+                prev_mask = last_result["final_mask"]
+                if skip_strategy is not None:
+                    mask = skip_strategy(frame_rgb, last_frame_rgb, prev_mask)
+                else:
+                    mask = prev_mask
                 mask3 = mask[..., None]
                 final = (
                     (frame_rgb * mask3 + pipeline._bg * (1.0 - mask3)).clip(0, 255).astype(np.uint8)
