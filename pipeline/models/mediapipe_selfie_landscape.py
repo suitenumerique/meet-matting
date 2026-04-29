@@ -81,7 +81,8 @@ class MediapipeSelfielandscape(MattingModel):
             raise RuntimeError("Model not loaded. Call load() first.")
 
         h, w = frame.shape[:2]
-        frame_small = cv2.resize(frame, (256, 256), interpolation=cv2.INTER_NEAREST)
+        interp = cv2.INTER_AREA if (h > 256 or w > 256) else cv2.INTER_LINEAR
+        frame_small = cv2.resize(frame, (256, 256), interpolation=interp)
         frame_rgba = cv2.cvtColor(frame_small, cv2.COLOR_RGB2RGBA)
 
         mp_image = self._mp.Image(image_format=self._mp.ImageFormat.SRGBA, data=frame_rgba)

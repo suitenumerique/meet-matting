@@ -73,8 +73,13 @@ class OpticalFlowWarp(SkipStrategy):
         method = self.params["flow_method"]
         blend = float(self.params["blend"])
 
-        prev_gray = cv2.cvtColor(prev_frame, cv2.COLOR_RGB2GRAY)
-        current_gray = cv2.cvtColor(current_frame, cv2.COLOR_RGB2GRAY)
+        h, w = current_frame.shape[:2]
+        fw, fh = max(1, w // 4), max(1, h // 4)
+        cur_small = cv2.resize(current_frame, (fw, fh), interpolation=cv2.INTER_LINEAR)
+        prev_small = cv2.resize(prev_frame, (fw, fh), interpolation=cv2.INTER_LINEAR)
+
+        prev_gray = cv2.cvtColor(prev_small, cv2.COLOR_RGB2GRAY)
+        current_gray = cv2.cvtColor(cur_small, cv2.COLOR_RGB2GRAY)
 
         # Backward flow: for each pixel in current_frame, where does it come from in prev_frame.
         # We compute flow from current → prev so that remap(prev_mask, flow) lands in the right spot.
@@ -94,6 +99,13 @@ class OpticalFlowWarp(SkipStrategy):
                 poly_sigma=1.2,
                 flags=0,
             )
+
+        # Scale flow vectors from flow resolution up to full-res mask space.
+        mask_h, mask_w = prev_mask.shape[:2]
+        if fw != mask_w or fh != mask_h:
+            flow = cv2.resize(flow, (mask_w, mask_h), interpolation=cv2.INTER_LINEAR)
+            flow[..., 0] *= mask_w / fw
+            flow[..., 1] *= mask_h / fh
 
         map_x, map_y = _build_remap(flow)
         warped = cv2.remap(
