@@ -122,6 +122,27 @@ class Postprocessor(Component, ABC):
         """
 
 
+class SkipStrategy(Component, ABC):
+    """Produces a mask for a frame that was not sent through the model.
+
+    Data contract:
+        __call__ receives:
+            current_frame: np.ndarray, shape (H, W, 3), dtype uint8, RGB — frame to fill.
+            prev_frame:    np.ndarray, shape (H, W, 3), dtype uint8, RGB — last inferred frame.
+            prev_mask:     np.ndarray, shape (H, W),   dtype float32, range [0, 1].
+        __call__ returns:
+            np.ndarray, shape (H, W), dtype float32, range [0, 1].
+    """
+
+    @abstractmethod
+    def __call__(
+        self,
+        current_frame: np.ndarray,
+        prev_frame: np.ndarray,
+        prev_mask: np.ndarray,
+    ) -> np.ndarray: ...
+
+
 class UpsamplingMethod(Component, ABC):
     """Upsamples a low-resolution mask to the resolution of a high-resolution guide image.
 

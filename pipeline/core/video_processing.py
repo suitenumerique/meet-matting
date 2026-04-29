@@ -1,6 +1,6 @@
 """
 Video processing utilities for running the pipeline on video files.
-Includes support for frame skipping to speed up processing.
+Includes support for frame skipping with pluggable skip strategies.
 """
 
 from __future__ import annotations
@@ -12,6 +12,8 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from core.base import SkipStrategy
+
 
 def process_video(
     pipeline,
@@ -19,6 +21,7 @@ def process_video(
     output_dir: Path,
     on_progress: Callable[[int, int, float], None] | None = None,
     skip_frames: int = 1,
+    skip_strategy: SkipStrategy | None = None,
 ) -> dict[str, Path]:
     """Run *pipeline* on frames of *video_path* and write results to *output_dir*.
 
@@ -33,11 +36,12 @@ def process_video(
     always runs at the original frame rate without frozen frames.
 
     Args:
-        pipeline:    A MattingPipeline instance (already loaded).
-        video_path:  Path to the source video.
-        output_dir:  Folder that will receive the output videos (created if absent).
-        on_progress: Optional callback called after each frame with (done, total, fps).
-        skip_frames: Run the model 1 frame every N frames; reuse last mask in between.
+        pipeline:       A :class:`MattingPipeline` instance (already loaded).
+        video_path:     Path to the source video.
+        output_dir:     Folder that will receive the output videos (created if absent).
+        on_progress:    Optional callback called after each frame with (done, total, fps).
+        skip_frames:    Process 1 frame every N frames; use *skip_strategy* in between.
+        skip_strategy:  How to fill skipped frames. Falls back to plain reuse if None.
 
     Returns:
         Dict with keys "mask", "raw", "composite", and "original".
@@ -51,15 +55,15 @@ def process_video(
     output_dir.mkdir(parents=True, exist_ok=True)
     fourcc = cv2.VideoWriter_fourcc(*"avc1")
 
-    mask_path      = output_dir / "mask.mp4"
-    raw_path       = output_dir / "raw.mp4"
+    mask_path = output_dir / "mask.mp4"
+    raw_path = output_dir / "raw.mp4"
     composite_path = output_dir / "composite.mp4"
-    original_path  = output_dir / "original.mp4"
+    original_path = output_dir / "original.mp4"
 
-    mask_writer      = cv2.VideoWriter(str(mask_path),      fourcc, orig_fps, (w, h))
-    raw_writer       = cv2.VideoWriter(str(raw_path),       fourcc, orig_fps, (w, h))
+    mask_writer = cv2.VideoWriter(str(mask_path), fourcc, orig_fps, (w, h))
+    raw_writer = cv2.VideoWriter(str(raw_path), fourcc, orig_fps, (w, h))
     composite_writer = cv2.VideoWriter(str(composite_path), fourcc, orig_fps, (w, h))
-    original_writer  = cv2.VideoWriter(str(original_path),  fourcc, orig_fps, (w, h))
+    original_writer = cv2.VideoWriter(str(original_path), fourcc, orig_fps, (w, h))
 
     idx = 0
     last_result: dict | None = None
@@ -89,9 +93,7 @@ def process_video(
                 mask = last_result["final_mask"]
                 mask3 = mask[..., None]
                 final = (
-                    (frame_rgb * mask3 + pipeline._bg * (1.0 - mask3))
-                    .clip(0, 255)
-                    .astype(np.uint8)
+                    (frame_rgb * mask3 + pipeline._bg * (1.0 - mask3)).clip(0, 255).astype(np.uint8)
                 )
                 last_result = {
                     "final_mask": mask,
@@ -123,8 +125,8 @@ def process_video(
         original_writer.release()
 
     return {
-        "mask":      mask_path,
-        "raw":       raw_path,
+        "mask": mask_path,
+        "raw": raw_path,
         "composite": composite_path,
-        "original":  original_path,
+        "original": original_path,
     }
