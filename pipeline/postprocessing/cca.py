@@ -1,19 +1,8 @@
 """
 Connected Component Analysis (CCA) post-processor.
-<<<<<<< HEAD
-
-Two complementary filters:
-  - top_n        : keep only the N largest blobs (0 = keep all).
-                   Most effective against furniture/object ghost detections.
-  - min_area_pct : drop blobs below X % of the frame area.
-                   Removes sub-pixel noise and tiny stray detections.
-
-Typical anti-ghost setup: top_n=1 (or 2 if two people), min_area_pct=0.5.
-=======
 Removes small isolated mask islands (artifacts).
 
 Optimized: uses a vectorized LUT approach instead of per-component Python loops.
->>>>>>> alexandre
 """
 
 import cv2
@@ -72,12 +61,8 @@ class ConnectedComponents(Postprocessor):
         pass
 
     def __call__(self, mask: np.ndarray, original_frame: np.ndarray) -> np.ndarray:
-<<<<<<< HEAD
-        if np.all(mask < _BINARISE_THRESH):
-=======
         # Fast exit: completely empty mask
         if not np.any(mask > 0.0):
->>>>>>> alexandre
             return mask
 
         # 1. Binarize for robust component detection (uint8 for OpenCV)
@@ -101,12 +86,8 @@ class ConnectedComponents(Postprocessor):
         areas = stats[:, cv2.CC_STAT_AREA]
         lut[1:] = (areas[1:] >= min_area).astype(np.float32)
 
-<<<<<<< HEAD
-        return refined
-=======
         # 3. Apply LUT in one vectorized indexing op (no Python loop)
         keep_mask = lut[labels]  # (H, W) float32, 0.0 or 1.0
 
         # Multiply: preserves soft alpha values for kept components, zeros discarded
         return mask * keep_mask
->>>>>>> alexandre
