@@ -49,6 +49,7 @@ def _guided_filter(guide_rgb: np.ndarray, mask: np.ndarray, radius: int, eps: fl
 @postprocessors.register
 class GuidedFilter(Postprocessor):
     name = "guided_filter"
+    hidden = True  # disponible en upsampling — masqué dans post-process
     description = "Realigns mask edges to image edges using the RGB frame as a guide."
 
     @classmethod

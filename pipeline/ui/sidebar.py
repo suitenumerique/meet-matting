@@ -118,7 +118,7 @@ def render_sidebar() -> SidebarSelection:
     # --- 5. Postprocessors ---
     with st.sidebar.expander("Postprocessors", expanded=False):
         st.caption("Refinements applied to the raw mask *after* the model, before compositing.")
-        post_names = postprocessors.names()
+        post_names = [n for n in postprocessors.names() if not getattr(postprocessors.get(n), "hidden", False)]
         chosen_post = st.multiselect(
             "Postprocessing steps (applied in order)",
             options=post_names,

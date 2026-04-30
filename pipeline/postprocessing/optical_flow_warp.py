@@ -45,6 +45,7 @@ from core.registry import postprocessors
 @postprocessors.register
 class OpticalFlowWarp(Postprocessor):
     name = "optical_flow_warp"
+    hidden = True  # disponible en skip strategy — masqué dans post-process
     description = (
         "Warp the previous mask with DIS optical flow before blending to remove ghosting."
     )

@@ -68,6 +68,7 @@ def process_video(
     idx = 0
     last_result: dict | None = None
     last_raw_bgr: np.ndarray | None = None
+    prev_frame_rgb: np.ndarray | None = None
     fps_val = orig_fps
 
     try:
@@ -89,11 +90,23 @@ def process_video(
                     (frame_rgb * raw_alpha).astype(np.uint8), cv2.COLOR_RGB2BGR
                 )
             else:
-                # Reuse last mask, re-composite onto the current source frame.
-                mask = last_result["final_mask"]
+                # Warp previous mask to current frame via skip strategy (ou simple réutilisation).
+                prev_mask = last_result["final_mask"]
+                if skip_strategy is not None and prev_frame_rgb is not None:
+                    mask = skip_strategy(frame_rgb, prev_frame_rgb, prev_mask)
+                else:
+                    mask = prev_mask
+
                 mask3 = mask[..., None]
+                bg = pipeline._bg
+                if bg.ndim == 3:
+                    fh, fw = frame_rgb.shape[:2]
+                    if bg.shape[:2] != (fh, fw):
+                        bg = cv2.resize(bg, (fw, fh), interpolation=cv2.INTER_LINEAR)
                 final = (
-                    (frame_rgb * mask3 + pipeline._bg * (1.0 - mask3)).clip(0, 255).astype(np.uint8)
+                    (frame_rgb.astype(np.float32) * mask3 + bg * (1.0 - mask3))
+                    .clip(0, 255)
+                    .astype(np.uint8)
                 )
                 last_result = {
                     "final_mask": mask,
@@ -106,6 +119,8 @@ def process_video(
                     last_raw_bgr = cv2.cvtColor(
                         (frame_rgb * raw_alpha).astype(np.uint8), cv2.COLOR_RGB2BGR
                     )
+
+            prev_frame_rgb = frame_rgb
 
             mask_uint8 = (last_result["final_mask"] * 255).astype(np.uint8)
             mask_writer.write(cv2.cvtColor(mask_uint8, cv2.COLOR_GRAY2BGR))

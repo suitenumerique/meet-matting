@@ -115,17 +115,6 @@ class MattingPipeline:
         if final_mask.ndim == 3:
             final_mask = final_mask.squeeze(-1)
         
-        mask3 = final_mask[..., None]
-        
-        # On travaille "in-place" sur une copie float pour éviter les allocations multiples
-        final = original.astype(np.float32)
-        final -= self._bg      # (FG - BG)
-        final *= mask3         # (FG - BG) * Mask
-        final += self._bg      # BG + (FG - BG) * Mask
-        
-        # Le clip est inutile car l'interpolation linéaire reste entre les bornes originales
-        final = final.astype(np.uint8)
-        
         timings["compositing"] = time.perf_counter() - t_comp_start
 
         mask3 = final_mask[..., None]  # (H, W, 1)

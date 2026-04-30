@@ -323,8 +323,12 @@ with tab_live:
                 DISP_W = 640
                 idx = 0
                 last_result: dict | None = None
+                prev_frame_rgb: np.ndarray | None = None
                 fps_history: list[float] = []
                 inf_history: list[float] = []
+
+                _skip_name, _skip_params = selection.skip_strategy
+                cam_skip_strategy = skip_strategies.get(_skip_name)(**_skip_params)
 
                 # Inject the first frame we already read above
                 frames_to_process = [bgr_test]
@@ -362,10 +366,32 @@ with tab_live:
                                 use_container_width=True,
                                 output_format="JPEG",
                             )
+                            prev_frame_rgb = rgb_full
                             idx += 1
                             fps_history.append(time.time() - loop_start)
                             continue
+                    else:
+                        # Warp previous mask via skip strategy pour les frames skippées.
+                        if prev_frame_rgb is not None:
+                            warped_mask = cam_skip_strategy(
+                                rgb_full, prev_frame_rgb, last_result["final_mask"]
+                            )
+                            bg = pipeline._bg
+                            if bg.ndim == 3:
+                                fh, fw = rgb_full.shape[:2]
+                                if bg.shape[:2] != (fh, fw):
+                                    bg = cv2.resize(bg, (fw, fh), interpolation=cv2.INTER_LINEAR)
+                            final_composited = (
+                                rgb_full.astype(np.float32) * warped_mask[..., None]
+                                + bg.astype(np.float32) * (1.0 - warped_mask[..., None])
+                            ).clip(0, 255).astype(np.uint8)
+                            last_result = {
+                                **last_result,
+                                "final_mask": warped_mask,
+                                "final": final_composited,
+                            }
 
+                    prev_frame_rgb = rgb_full
                     result = last_result
                     final_mask = cv2.resize(result["final_mask"], (DISP_W, disp_h))
                     m3d = final_mask[:, :, np.newaxis]
