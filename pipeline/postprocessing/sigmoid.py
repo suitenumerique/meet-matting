@@ -29,19 +29,27 @@ class Sigmoid(Postprocessor):
 
         σ(x) = 1 / (1 + exp(-gain · (x - 0.5)))
 
-        Args:
-            mask:           Alpha matte, shape (H, W), dtype float32, range [0, 1].
-            original_frame: Original RGB frame (unused).
-
-        Returns:
-            Sharpened mask, shape (H, W), dtype float32, range [0, 1].
+        Optimized: pre-compute normalization scalars, single np.exp call,
+        in-place operations to minimise temporary arrays.
         """
         gain = float(self.params["gain"])
 
-        def _s(x):
-            return 1.0 / (1.0 + np.exp(-gain * (x - 0.5)))
+        # Pre-compute normalization constants (scalars — free)
+        s0 = 1.0 / (1.0 + np.exp(gain * 0.5))     # σ(0)
+        s1 = 1.0 / (1.0 + np.exp(-gain * 0.5))     # σ(1)
+        inv_range = np.float32(1.0 / (s1 - s0))
+        s0_f32 = np.float32(s0)
 
-        # Normalise so that f(0)=0 and f(1)=1 exactly.
-        s0 = _s(0.0)
-        s1 = _s(1.0)
-        return ((_s(mask) - s0) / (s1 - s0)).astype(np.float32)
+        # Single in-place pass: avoid creating (x - 0.5) temporary
+        # exponent = -gain * (mask - 0.5)
+        exponent = np.subtract(mask, 0.5)      # in-place candidate
+        exponent *= -gain
+        np.exp(exponent, out=exponent)          # exp in-place
+        exponent += 1.0                         # 1 + exp(...)
+        np.reciprocal(exponent, out=exponent)   # 1 / (1 + exp(...))
+
+        # Normalize so f(0)=0, f(1)=1
+        exponent -= s0_f32
+        exponent *= inv_range
+
+        return exponent
