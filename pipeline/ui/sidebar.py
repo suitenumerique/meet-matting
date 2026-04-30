@@ -88,6 +88,8 @@ def render_sidebar() -> SidebarSelection:
             help="Absolute or relative path to a weights file. Leave empty to use default.",
             key="weights_path",
         )
+        # Ensure we don't crash if session_state was set to None during import
+        weights_input = weights_input or ""
         weights_path: str | None = weights_input.strip() or None
 
         model_params = render_component_config(model_cls, key_prefix="model")
