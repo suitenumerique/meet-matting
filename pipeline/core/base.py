@@ -154,15 +154,20 @@ class UpsamplingMethod(Component, ABC):
             np.ndarray, shape (H_h, W_h), dtype float32, range [0, 1].
     """
 
-    @abstractmethod
     def upsample(self, low_res_mask: np.ndarray, guide: np.ndarray) -> np.ndarray:
-        """Upsample *low_res_mask* to the resolution of *guide*.
+        """Upsample *low_res_mask* to the resolution of *guide* with profiling."""
+        import time
+        from core import context
+        
+        t_start = time.perf_counter()
+        result = self._upsample_impl(low_res_mask, guide)
+        
+        # On accumule le temps (utile si plusieurs upsamplings par frame, ex: Person Zoom)
+        current = context.get_val("upsampling_time", 0.0)
+        context.set_val("upsampling_time", current + (time.perf_counter() - t_start))
+        
+        return result
 
-        Args:
-            low_res_mask: Alpha matte, shape (H_l, W_l), dtype float32, range [0, 1].
-            guide:        Full-resolution RGB frame used as upsampling guidance,
-                          shape (H_h, W_h, 3), dtype uint8.
-
-        Returns:
-            Upsampled alpha matte, shape (H_h, W_h), dtype float32, range [0, 1].
-        """
+    @abstractmethod
+    def _upsample_impl(self, low_res_mask: np.ndarray, guide: np.ndarray) -> np.ndarray:
+        """Actual implementation of upsampling. To be overridden by subclasses."""

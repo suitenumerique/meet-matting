@@ -388,10 +388,15 @@ with tab_live:
                             final = (rgb_disp * m3d).astype(np.uint8)
 
                     if show_panels:
-                        ph_orig.image(rgb_disp, caption="Original", use_container_width=True, output_format="JPEG")
+                        # On affiche la version "preprocessed" (avec les bboxes du Person Zoom)
+                        pre_disp = cv2.resize(result["preprocessed"], (DISP_W, disp_h))
+                        ph_orig.image(pre_disp, caption="Pre-processing (BBoxes)", use_container_width=True, output_format="JPEG")
+                        
                         ph_final.image(final, channels="RGB", caption="Composite", use_container_width=True, output_format="JPEG")
+                        
                         raw_uint8 = (cv2.resize(result["raw_mask"], (DISP_W, disp_h)) * 255).astype(np.uint8)
                         ph_raw.image(raw_uint8, caption="Masque brut", use_container_width=True, output_format="JPEG")
+                        
                         fin_uint8 = (final_mask * 255).astype(np.uint8)
                         ph_fin_mask.image(fin_uint8, caption="Masque final (post-proc)", use_container_width=True, output_format="JPEG")
                     else:
@@ -430,6 +435,9 @@ with tab_live:
                             # Section Modèle
                             table_md += f"| 🧠 **Inférence IA** | **{t.get('model_inference', 0)*1000:.2f}** |\n"
                             
+                            # Section Upsampling
+                            table_md += f"| ⬆️ **Upsampling** | **{t.get('upsampling', 0)*1000:.2f}** |\n"
+                            
                             # Section Post
                             for k, v in t.items():
                                 if k.startswith("post_"):
@@ -444,3 +452,4 @@ with tab_live:
 
                 cap.release()
                 cam_status.info("Caméra arrêtée.")
+

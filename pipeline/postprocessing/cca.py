@@ -37,19 +37,29 @@ class ConnectedComponents(Postprocessor):
         if np.sum(mask) == 0:
             return mask
 
-        # Convert to u8 for OpenCV
+        # 1. Convert to binary u8 for robust component detection
+        # We use a mid-threshold (127) to isolate strong components
         m_u8 = (mask * 255).astype(np.uint8)
-        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(m_u8)
+        _, binary_mask = cv2.threshold(m_u8, 127, 255, cv2.THRESH_BINARY)
+        
+        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(binary_mask)
 
         if num_labels <= 1:
             return mask
 
-        refined_mask = mask.copy()
-        total_area = np.sum(mask > 0.1)
+        # 2. Calculate total area of "confident" mask
+        total_area = np.sum(binary_mask > 0)
+        if total_area == 0:
+            return mask
 
+        refined_mask = mask.copy()
+        min_area = total_area * self.params["min_area_ratio"]
+
+        # 3. Remove small components
         for i in range(1, num_labels):
             area = stats[i, cv2.CC_STAT_AREA]
-            if area < (total_area * self.params["min_area_ratio"]):
+            if area < min_area:
+                # Zero out this component in the final soft mask
                 refined_mask[labels == i] = 0
 
         return refined_mask

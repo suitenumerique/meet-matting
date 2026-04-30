@@ -20,10 +20,13 @@ class MattingPipeline:
         model: MattingModel,
         postprocessors: list[Postprocessor],
         bg_color: tuple[int, int, int] = (0, 0, 0),
+        bg_image: np.ndarray | None = None,
     ):
         self.preprocessors = preprocessors
         self.model = model
         self.postprocessors = postprocessors
+        self._bg_color = bg_color
+        self._bg_image = bg_image
         self._bg = np.array(bg_color, dtype=np.float32)[None, None, :]  # (1, 1, 3)
 
     def reset(self):
@@ -55,6 +58,8 @@ class MattingPipeline:
 
         # 2. Model Inference (with automatic Person Zoom support)
         t_model_start = time.perf_counter()
+        context.set_val("upsampling_time", 0.0)  # Reset for this frame
+        
         bboxes = context.get_val("person_bboxes", [])
         zoom_active = context.get_val("person_zoom_active", False)
         h_orig, w_orig = frame.shape[:2]
@@ -80,9 +85,13 @@ class MattingPipeline:
                 if mask_expanded.ndim == 3:
                     mask_expanded = mask_expanded.squeeze(-1)
 
+                # Time the crop upsampling (back to original resolution of the crop)
+                t_up_start = time.perf_counter()
                 mask_expanded = cv2.resize(
                     mask_expanded, (ex2 - ex1, ey2 - ey1), interpolation=cv2.INTER_LINEAR
                 )
+                dt_up = time.perf_counter() - t_up_start
+                context.set_val("upsampling_time", context.get_val("upsampling_time", 0.0) + dt_up)
 
                 mask_crop = mask_expanded[y1 - ey1 : y2 - ey1, x1 - ex1 : x2 - ex1]
                 mask_full[y1:y2, x1:x2] = np.maximum(mask_full[y1:y2, x1:x2], mask_crop)
@@ -95,6 +104,7 @@ class MattingPipeline:
             raw_mask = raw_mask.squeeze(-1)
         
         timings["model_inference"] = time.perf_counter() - t_model_start
+        timings["upsampling"] = context.get_val("upsampling_time", 0.0)
 
         # 3. Postprocessing
         t_post_start = time.perf_counter()
@@ -113,21 +123,33 @@ class MattingPipeline:
         
         mask3 = final_mask[..., None]
         
-        # On travaille "in-place" sur une copie float pour éviter les allocations multiples
+        # Gestion du background (image ou couleur)
+        if self._bg_image is not None:
+            # Resize bg_image only if needed
+            if self._bg_image.shape[:2] != (h_orig, w_orig):
+                bg_ready = cv2.resize(self._bg_image, (w_orig, h_orig))
+            else:
+                bg_ready = self._bg_image
+            bg_ready = bg_ready.astype(np.float32)
+        else:
+            bg_ready = self._bg
+
+        # Formule : Result = Original * Mask + BG * (1 - Mask)
+        # On utilise une version in-place pour optimiser
         final = original.astype(np.float32)
-        final -= self._bg      # (FG - BG)
-        final *= mask3         # (FG - BG) * Mask
-        final += self._bg      # BG + (FG - BG) * Mask
-        
-        # Le clip est inutile car l'interpolation linéaire reste entre les bornes originales
+        final *= mask3
+        final += bg_ready * (1.0 - mask3)
         final = final.astype(np.uint8)
         
         timings["compositing"] = time.perf_counter() - t_comp_start
 
         # 5. Prepare debug view
-        debug_frame = inference_frame.copy()
-        for x1, y1, x2, y2 in bboxes:
-            cv2.rectangle(debug_frame, (x1, y1), (x2, y2), (255, 255, 255), 2)
+        # We draw boxes on a separate debug frame
+        debug_frame = original.copy()
+        if zoom_active:
+            for x1, y1, x2, y2 in bboxes:
+                cv2.rectangle(debug_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                cv2.putText(debug_frame, "ZOOM", (x1, y1-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
 
         # Draw Pose Landmarks
         if context.get_val("show_landmarks") and context.get_val("pose_landmarks"):
@@ -154,5 +176,7 @@ class MattingPipeline:
             "raw_mask": raw_mask,
             "final_mask": final_mask,
             "final": final,
-            "timings": timings
+            "timings": timings,
+            "bboxes": bboxes if zoom_active else [],
+            "zoom_active": zoom_active
         }

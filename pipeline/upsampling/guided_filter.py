@@ -39,7 +39,7 @@ class GuidedFilter(UpsamplingMethod):
             ),
         ]
 
-    def upsample(self, low_res_mask: np.ndarray, guide: np.ndarray) -> np.ndarray:
+    def _upsample_impl(self, low_res_mask: np.ndarray, guide: np.ndarray) -> np.ndarray:
         """Bilinear-upsample then refine with a guided filter.
 
         Args:

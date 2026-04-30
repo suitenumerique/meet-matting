@@ -13,7 +13,7 @@ class Linear(UpsamplingMethod):
     def parameter_specs(cls):
         return []
 
-    def upsample(self, low_res_mask: np.ndarray, guide: np.ndarray) -> np.ndarray:
+    def _upsample_impl(self, low_res_mask: np.ndarray, guide: np.ndarray) -> np.ndarray:
         H_h, W_h = guide.shape[:2]
         if low_res_mask.shape[:2] == (H_h, W_h):
             return low_res_mask
