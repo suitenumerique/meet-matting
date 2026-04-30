@@ -20,11 +20,15 @@ class MattingPipeline:
         model: MattingModel,
         postprocessors: list[Postprocessor],
         bg_color: tuple[int, int, int] = (0, 0, 0),
+        bg_image: np.ndarray | None = None,
     ):
         self.preprocessors = preprocessors
         self.model = model
         self.postprocessors = postprocessors
-        self._bg = np.array(bg_color, dtype=np.float32)[None, None, :]  # (1, 1, 3)
+        if bg_image is not None:
+            self._bg = bg_image.astype(np.float32)  # (H, W, 3)
+        else:
+            self._bg = np.array(bg_color, dtype=np.float32)[None, None, :]  # (1, 1, 3)
 
     def reset(self):
         """Reset state of all components (counters, buffers, etc.)."""
@@ -124,7 +128,15 @@ class MattingPipeline:
         
         timings["compositing"] = time.perf_counter() - t_comp_start
 
-        # 5. Prepare debug view
+        mask3 = final_mask[..., None]  # (H, W, 1)
+        bg = self._bg
+        if bg.ndim == 3:
+            h, w = original.shape[:2]
+            if bg.shape[:2] != (h, w):
+                bg = cv2.resize(bg, (w, h), interpolation=cv2.INTER_LINEAR)
+        final = (original * mask3 + bg * (1.0 - mask3)).clip(0, 255).astype(np.uint8)
+
+        # 5. Prepare debug view for UI (preprocessed frame + overlays)
         debug_frame = inference_frame.copy()
         for x1, y1, x2, y2 in bboxes:
             cv2.rectangle(debug_frame, (x1, y1), (x2, y2), (255, 255, 255), 2)
