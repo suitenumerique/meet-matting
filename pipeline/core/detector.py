@@ -160,16 +160,34 @@ class PoseDetector:
 
 
 class YoloDetector:
-    """Uses Ultralytics YOLOv8 for high-performance person detection."""
+    """Uses Ultralytics YOLO11 for high-performance person detection."""
+    
+    # Class-level cache to avoid reloading the model
+    _MODEL_CACHE = {}
 
     def __init__(self, model_size: str = "n", score_threshold: float = 0.25):
         self._model = None
         self._size = model_size
         self._conf = score_threshold
+        self._device = "cpu"
 
     def load(self):
+        cache_key = (self._size, self._conf)
+        if cache_key in self._MODEL_CACHE:
+            self._model, self._device = self._MODEL_CACHE[cache_key]
+            return
+
         try:
+            import torch
             from ultralytics import YOLO
+            
+            # CRITICAL FIX: DO NOT use MPS for YOLO on Mac.
+            # PyTorch's NMS (Non-Maximum Suppression) operation on MPS 
+            # currently causes massive hangs (> 8 seconds) and freezes the app.
+            # We strictly force CPU, which is actually very fast for YOLO Nano.
+            self._device = "cpu"
+                
+            logger.info(f"YOLO11 loading on device: {self._device} (MPS disabled for stability)")
         except ImportError as e:
             raise ImportError(
                 "ultralytics is required for YoloDetector. Please run: uv pip install ultralytics"
@@ -177,11 +195,15 @@ class YoloDetector:
 
         weights_dir = Path(__file__).parent.parent / "weights"
         weights_dir.mkdir(parents=True, exist_ok=True)
-        # Using nano version (yolov8n.pt) for speed
-        model_path = weights_dir / f"yolov8{self._size}.pt"
+        # Using YOLO11 prefix
+        model_path = weights_dir / f"yolo11{self._size}.pt"
 
-        # YOLO will handle download automatically if not found
-        self._model = YOLO(str(model_path))
+        model = YOLO(str(model_path))
+        model.to(self._device)
+        # Note: Keeping half=False for stability against 'gray screen' issues
+            
+        self._model = model
+        self._MODEL_CACHE[cache_key] = (self._model, self._device)
 
     def detect(
         self, frame_rgb: np.ndarray, padding: float = 0.05
@@ -193,30 +215,41 @@ class YoloDetector:
         h, w = frame_rgb.shape[:2]
 
         # Inference
+        # Using imgsz=320 for speed, half=False for stability
         results = self._model.predict(
             source=frame_rgb,
             conf=self._conf,
             classes=[0],  # 0 is 'person' in COCO
             verbose=False,
+            device=self._device,
+            imgsz=320, 
+            half=False, 
         )
 
         bboxes = []
         for result in results:
-            for box in result.boxes:
-                # Get xyxy tensor and convert to list
-                x1, y1, x2, y2 = box.xyxy[0].tolist()
+            if result.boxes is not None and len(result.boxes) > 0:
+                # Get boxes in xyxy format
+                boxes = result.boxes.xyxy.cpu().numpy()
+                for box in boxes:
+                    x1, y1, x2, y2 = box
+                    bw, bh = x2 - x1, y2 - y1
 
-                bw, bh = x2 - x1, y2 - y1
+                    # Add padding
+                    pad_w, pad_h = bw * padding, bh * padding
 
-                # Add padding
-                pad_w, pad_h = bw * padding, bh * padding
+                    fx1 = int(max(0, x1 - pad_w))
+                    fy1 = int(max(0, y1 - pad_h))
+                    fx2 = int(min(w, x2 + pad_w))
+                    fy2 = int(min(h, y2 + pad_h))
 
-                fx1 = max(0, x1 - pad_w)
-                fy1 = max(0, y1 - pad_h)
-                fx2 = min(w, x2 + pad_w)
-                fy2 = min(h, y2 + pad_h)
-
-                bboxes.append((int(fx1), int(fy1), int(fx2), int(fy2)))
+                    if fx2 > fx1 and fy2 > fy1:
+                        bboxes.append((fx1, fy1, fx2, fy2))
+        
+        if not bboxes:
+            logger.debug(f"YOLO: No person detected (device={self._device})")
+        else:
+            logger.debug(f"YOLO: Detected {len(bboxes)} persons")
 
         return bboxes
 

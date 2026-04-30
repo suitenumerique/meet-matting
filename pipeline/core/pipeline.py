@@ -59,6 +59,8 @@ class MattingPipeline:
 
         # 2. Model Inference (with automatic Person Zoom support)
         t_model_start = time.perf_counter()
+        context.set_val("upsampling_time", 0.0)  # Reset for this frame
+        
         bboxes = context.get_val("person_bboxes", [])
         zoom_active = context.get_val("person_zoom_active", False)
         h_orig, w_orig = frame.shape[:2]
@@ -84,9 +86,13 @@ class MattingPipeline:
                 if mask_expanded.ndim == 3:
                     mask_expanded = mask_expanded.squeeze(-1)
 
+                # Time the crop upsampling (back to original resolution of the crop)
+                t_up_start = time.perf_counter()
                 mask_expanded = cv2.resize(
                     mask_expanded, (ex2 - ex1, ey2 - ey1), interpolation=cv2.INTER_LINEAR
                 )
+                dt_up = time.perf_counter() - t_up_start
+                context.set_val("upsampling_time", context.get_val("upsampling_time", 0.0) + dt_up)
 
                 mask_crop = mask_expanded[y1 - ey1 : y2 - ey1, x1 - ex1 : x2 - ex1]
                 mask_full[y1:y2, x1:x2] = np.maximum(mask_full[y1:y2, x1:x2], mask_crop)
@@ -99,6 +105,7 @@ class MattingPipeline:
             raw_mask = raw_mask.squeeze(-1)
         
         timings["model_inference"] = time.perf_counter() - t_model_start
+        timings["upsampling"] = context.get_val("upsampling_time", 0.0)
 
         # 3. Postprocessing
         t_post_start = time.perf_counter()
@@ -115,20 +122,35 @@ class MattingPipeline:
         if final_mask.ndim == 3:
             final_mask = final_mask.squeeze(-1)
         
+        mask3 = final_mask[..., None]
+        
+        # Gestion du background (image ou couleur)
+        if self._bg_image is not None:
+            # Resize bg_image only if needed
+            if self._bg_image.shape[:2] != (h_orig, w_orig):
+                bg_ready = cv2.resize(self._bg_image, (w_orig, h_orig))
+            else:
+                bg_ready = self._bg_image
+            bg_ready = bg_ready.astype(np.float32)
+        else:
+            bg_ready = self._bg
+
+        # Formule : Result = Original * Mask + BG * (1 - Mask)
+        # On utilise une version in-place pour optimiser
+        final = original.astype(np.float32)
+        final *= mask3
+        final += bg_ready * (1.0 - mask3)
+        final = final.astype(np.uint8)
+        
         timings["compositing"] = time.perf_counter() - t_comp_start
 
-        mask3 = final_mask[..., None]  # (H, W, 1)
-        bg = self._bg
-        if bg.ndim == 3:
-            h, w = original.shape[:2]
-            if bg.shape[:2] != (h, w):
-                bg = cv2.resize(bg, (w, h), interpolation=cv2.INTER_LINEAR)
-        final = (original * mask3 + bg * (1.0 - mask3)).clip(0, 255).astype(np.uint8)
-
-        # 5. Prepare debug view for UI (preprocessed frame + overlays)
-        debug_frame = inference_frame.copy()
-        for x1, y1, x2, y2 in bboxes:
-            cv2.rectangle(debug_frame, (x1, y1), (x2, y2), (255, 255, 255), 2)
+        # 5. Prepare debug view
+        # We draw boxes on a separate debug frame
+        debug_frame = original.copy()
+        if zoom_active:
+            for x1, y1, x2, y2 in bboxes:
+                cv2.rectangle(debug_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                cv2.putText(debug_frame, "ZOOM", (x1, y1-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
 
         # Draw Pose Landmarks
         if context.get_val("show_landmarks") and context.get_val("pose_landmarks"):
@@ -155,5 +177,7 @@ class MattingPipeline:
             "raw_mask": raw_mask,
             "final_mask": final_mask,
             "final": final,
-            "timings": timings
+            "timings": timings,
+            "bboxes": bboxes if zoom_active else [],
+            "zoom_active": zoom_active
         }

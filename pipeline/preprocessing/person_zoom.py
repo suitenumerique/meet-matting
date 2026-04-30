@@ -85,6 +85,15 @@ class PersonZoom(Preprocessor):
                 label="Afficher les points clés (33)",
                 help="Affiche le squelette et les points clés MediaPipe sur la vue debug.",
             ),
+            ParameterSpec(
+                name="max_persons",
+                type="int",
+                default=2,
+                min_value=1,
+                max_value=10,
+                label="Max Personnes (Zoom)",
+                help="Limite le nombre de personnes zoomées pour préserver les FPS.",
+            ),
         ]
 
     def reset(self):
@@ -146,6 +155,12 @@ class PersonZoom(Preprocessor):
                         raw_bboxes.append((int(bx1), int(by1), int(bx2), int(by2)))
             else:
                 raw_bboxes = self.detector.detect(frame, padding=padding)
+
+            # Optimization: Limit the number of persons to avoid multi-inference overhead
+            max_p = self.params.get("max_persons", 2)
+            if len(raw_bboxes) > max_p:
+                # Sort by area (descending) to keep the closest/largest people
+                raw_bboxes = sorted(raw_bboxes, key=lambda b: (b[2]-b[0]) * (b[3]-b[1]), reverse=True)[:max_p]
 
             self.last_bboxes = self._update_smoothed_boxes(raw_bboxes, alpha, hysteresis)
 

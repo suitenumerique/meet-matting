@@ -69,32 +69,29 @@ class ConnectedComponents(Postprocessor):
         if np.all(mask < _BINARISE_THRESH):
             return mask
 
-        m_u8 = (mask >= _BINARISE_THRESH).astype(np.uint8) * 255
-        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(m_u8, connectivity=8)
+        # 1. Convert to binary u8 for robust component detection
+        # We use a mid-threshold (127) to isolate strong components
+        m_u8 = (mask * 255).astype(np.uint8)
+        _, binary_mask = cv2.threshold(m_u8, 127, 255, cv2.THRESH_BINARY)
+        
+        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(binary_mask)
 
         if num_labels <= 1:
             return mask
 
-        # Sort components by area (descending), skip background label 0
-        order = sorted(range(1, num_labels), key=lambda i: stats[i, cv2.CC_STAT_AREA], reverse=True)
+        # 2. Calculate total area of "confident" mask
+        total_area = np.sum(binary_mask > 0)
+        if total_area == 0:
+            return mask
 
-        # Apply top_n
-        top_n = int(self.params["top_n"])
-        if top_n > 0:
-            order = order[:top_n]
+        refined_mask = mask.copy()
+        min_area = total_area * self.params["min_area_ratio"]
 
-        # Apply min_area_pct (relative to frame area)
-        frame_area = mask.shape[0] * mask.shape[1]
-        min_pixels = frame_area * self.params["min_area_pct"] / 100.0
-        order = [i for i in order if stats[i, cv2.CC_STAT_AREA] >= min_pixels]
-
-        if not order:
-            return mask  # nothing passed the filters — return unchanged to avoid blank frame
-
-        keep = set(order)
-        refined = mask.copy()
+        # 3. Remove small components
         for i in range(1, num_labels):
-            if i not in keep:
-                refined[labels == i] = 0.0
+            area = stats[i, cv2.CC_STAT_AREA]
+            if area < min_area:
+                # Zero out this component in the final soft mask
+                refined_mask[labels == i] = 0
 
         return refined

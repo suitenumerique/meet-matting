@@ -466,6 +466,9 @@ with tab_live:
                             # Section Modèle
                             table_md += f"| 🧠 **Inférence IA** | **{t.get('model_inference', 0)*1000:.2f}** |\n"
                             
+                            # Section Upsampling
+                            table_md += f"| ⬆️ **Upsampling** | **{t.get('upsampling', 0)*1000:.2f}** |\n"
+                            
                             # Section Post
                             for k, v in t.items():
                                 if k.startswith("post_"):
@@ -480,3 +483,4 @@ with tab_live:
 
                 cap.release()
                 cam_status.info("Caméra arrêtée.")
+

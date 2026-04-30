@@ -46,7 +46,7 @@ class JointBilateral(UpsamplingMethod):
             ),
         ]
 
-    def upsample(self, low_res_mask: np.ndarray, guide: np.ndarray) -> np.ndarray:
+    def _upsample_impl(self, low_res_mask: np.ndarray, guide: np.ndarray) -> np.ndarray:
         """Joint bilateral upsample *low_res_mask* guided by the full-resolution *guide*.
 
         Algorithm (Kopf et al. 2007): for every high-res output pixel x, aggregate
