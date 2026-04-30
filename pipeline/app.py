@@ -1,27 +1,39 @@
 import os
+
 os.environ["OPENCV_AVFOUNDATION_SKIP_AUTH"] = "0"
 
-import time
 import hashlib
 import json
 import time
+import urllib.request
 from datetime import datetime
 from pathlib import Path
 
-import streamlit as st
+import cv2
 import numpy as np
+import streamlit as st
 from config import OUTPUT_DIR
 from core.pipeline import MattingPipeline
 from core.registry import models, postprocessors, preprocessors, skip_strategies, upsamplers
 from core.video_io import frame_count, read_frame
 from core.video_processing import process_video
-from ui.sidebar import render_sidebar
+from ui.sidebar import _BG_IMAGE_URLS, render_sidebar
 from ui.synced_player import display_synced_player
 from ui.video_panel import display_four_panels
 
-import urllib.request
-import tempfile
-import cv2
+
+@st.cache_resource
+def _load_bg_image(name: str) -> np.ndarray | None:
+    url = _BG_IMAGE_URLS.get(name)
+    if url is None:
+        return None
+    try:
+        resp = urllib.request.urlopen(url)
+        img = cv2.imdecode(np.asarray(bytearray(resp.read()), dtype="uint8"), 1)
+        return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    except Exception:
+        return None
+
 
 # Auto-discover all plugins.
 preprocessors.discover("preprocessing")
@@ -121,7 +133,10 @@ if st.session_state.get("_model_key") != _model_key:
 model = st.session_state["_model"]
 pre_components = [preprocessors.get(name)(**params) for name, params in selection.preprocessors]
 post_components = [postprocessors.get(name)(**params) for name, params in selection.postprocessors]
-pipeline = MattingPipeline(pre_components, model, post_components, bg_color=selection.bg_color)
+bg_image = _load_bg_image(selection.bg_image_name) if selection.bg_image_name else None
+pipeline = MattingPipeline(
+    pre_components, model, post_components, bg_color=selection.bg_color, bg_image=bg_image
+)
 
 # ── TABS ───────────────────────────────────────────────────────────────────────
 tab_lab, tab_live = st.tabs(["📽️ Laboratoire Vidéo", "📸 Test Caméra"])
@@ -166,7 +181,9 @@ with tab_lab:
     with col_info:
         frames_to_process = (total + skip_frames - 1) // skip_frames
         strategy_name = selection.skip_strategy[0]
-        st.caption(f"Processing **{frames_to_process} frames** (Skip: {skip_frames}, Strategy: `{strategy_name}`).")
+        st.caption(
+            f"Processing **{frames_to_process} frames** (Skip: {skip_frames}, Strategy: `{strategy_name}`)."
+        )
 
     if run_clicked:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -199,8 +216,12 @@ with tab_lab:
 
         with st.spinner("Processing video..."):
             paths = process_video(
-                pipeline, selection.video_path, run_dir, _on_progress,
-                skip_frames=skip_frames, skip_strategy=strategy_instance
+                pipeline,
+                selection.video_path,
+                run_dir,
+                _on_progress,
+                skip_frames=skip_frames,
+                skip_strategy=strategy_instance,
             )
 
         st.success(f"Saved to `{run_dir.name}`")
@@ -213,7 +234,11 @@ with tab_lab:
         if not OUTPUT_DIR.exists():
             st.info("No saved runs yet.")
         else:
-            run_dirs = sorted([d for d in OUTPUT_DIR.iterdir() if d.is_dir()], key=lambda d: d.stat().st_mtime, reverse=True)
+            run_dirs = sorted(
+                [d for d in OUTPUT_DIR.iterdir() if d.is_dir()],
+                key=lambda d: d.stat().st_mtime,
+                reverse=True,
+            )
             run_names = [d.name for d in run_dirs]
             if not run_names:
                 st.info("No saved runs yet.")
@@ -222,13 +247,14 @@ with tab_lab:
                 rd = OUTPUT_DIR / selected_run
                 conf_p = rd / "config.json"
                 if conf_p.exists():
-                    with open(conf_p) as f: st.json(json.load(f))
-                
+                    with open(conf_p) as f:
+                        st.json(json.load(f))
+
                 v_paths = {
                     "original": rd / "original.mp4",
                     "mask": rd / "mask.mp4",
                     "raw": rd / "raw.mp4",
-                    "composite": rd / "composite.mp4"
+                    "composite": rd / "composite.mp4",
                 }
                 if all(p.exists() for p in v_paths.values()):
                     display_synced_player(v_paths)
@@ -239,17 +265,7 @@ with tab_live:
     st.subheader("Démo en temps réel")
     col_ctrl, col_stats = st.columns([3, 1])
     with col_ctrl:
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            bg_mode = st.selectbox(
-                "Arrière-plan",
-                ["Couleur sidebar", "Noir", "Flou (Portrait)", "Bureau Moderne", "Nature"],
-                index=0,
-            )
-        with c2:
-            live_skip = st.number_input("Skip Frames (Live)", min_value=1, value=1)
-        with c3:
-            show_panels = st.checkbox("Vue 4 panneaux", value=False)
+        show_panels = st.checkbox("Vue 4 panneaux", value=False)
     with col_stats:
         fps_placeholder = st.empty()
         inf_placeholder = st.empty()
@@ -303,29 +319,6 @@ with tab_live:
 
                 st_debug = st.empty()
 
-                bg_cache: dict = {}
-                bg_resized_cache: dict = {}
-
-                def get_bg(mode: str, w: int, h: int):
-                    if mode not in bg_cache:
-                        urls = {
-                            "Bureau Moderne": "https://images.unsplash.com/photo-1497366216548-37526070297c?auto=format&fit=crop&w=1280&q=80",
-                            "Nature": "https://images.unsplash.com/photo-1441974231531-c6227db76b6e?auto=format&fit=crop&w=1280&q=80",
-                        }
-                        url = urls.get(mode)
-                        if url is None:
-                            return None
-                        try:
-                            resp = urllib.request.urlopen(url)
-                            img = cv2.imdecode(np.asarray(bytearray(resp.read()), dtype="uint8"), 1)
-                            bg_cache[mode] = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-                        except Exception:
-                            return None
-                    key = (mode, w, h)
-                    if key not in bg_resized_cache:
-                        bg_resized_cache[key] = cv2.resize(bg_cache[mode], (w, h))
-                    return bg_resized_cache[key]
-
                 DISP_W = 640
                 idx = 0
                 last_result: dict | None = None
@@ -352,7 +345,7 @@ with tab_live:
                     rgb_disp = cv2.resize(rgb_full, (DISP_W, disp_h))
 
                     # Always run the full pipeline (pre + model + post)
-                    if idx % live_skip == 0 or last_result is None:
+                    if idx % selection.skip_frames == 0 or last_result is None:
                         try:
                             inf_start = time.time()
                             last_result = pipeline.process_frame(rgb_full)
@@ -362,7 +355,12 @@ with tab_live:
                         except Exception as exc:
                             cam_status.error(f"⚠️ Erreur pipeline : {exc}")
                             # Show raw frame so the user sees something
-                            ph_final.image(rgb_disp, channels="RGB", use_container_width=True, output_format="JPEG")
+                            ph_final.image(
+                                rgb_disp,
+                                channels="RGB",
+                                use_container_width=True,
+                                output_format="JPEG",
+                            )
                             idx += 1
                             fps_history.append(time.time() - loop_start)
                             continue
@@ -371,30 +369,42 @@ with tab_live:
                     final_mask = cv2.resize(result["final_mask"], (DISP_W, disp_h))
                     m3d = final_mask[:, :, np.newaxis]
 
-                    if bg_mode == "Couleur sidebar":
-                        final = cv2.resize(result["final"], (DISP_W, disp_h))
-                    elif bg_mode == "Noir":
-                        final = (rgb_disp * m3d).astype(np.uint8)
-                    elif bg_mode == "Flou (Portrait)":
-                        small = cv2.resize(rgb_disp, (DISP_W // 4, disp_h // 4))
-                        blurred = cv2.resize(cv2.GaussianBlur(small, (15, 15), 0), (DISP_W, disp_h))
-                        final = (rgb_disp * m3d + blurred * (1.0 - m3d)).astype(np.uint8)
-                    else:
-                        curr_bg = get_bg(bg_mode, DISP_W, disp_h)
-                        if curr_bg is not None:
-                            final = (rgb_disp * m3d + curr_bg * (1.0 - m3d)).astype(np.uint8)
-                        else:
-                            final = (rgb_disp * m3d).astype(np.uint8)
+                    final = cv2.resize(result["final"], (DISP_W, disp_h))
 
                     if show_panels:
-                        ph_orig.image(rgb_disp, caption="Original", use_container_width=True, output_format="JPEG")
-                        ph_final.image(final, channels="RGB", caption="Composite", use_container_width=True, output_format="JPEG")
-                        raw_uint8 = (cv2.resize(result["raw_mask"], (DISP_W, disp_h)) * 255).astype(np.uint8)
-                        ph_raw.image(raw_uint8, caption="Masque brut", use_container_width=True, output_format="JPEG")
+                        ph_orig.image(
+                            rgb_disp,
+                            caption="Original",
+                            use_container_width=True,
+                            output_format="JPEG",
+                        )
+                        ph_final.image(
+                            final,
+                            channels="RGB",
+                            caption="Composite",
+                            use_container_width=True,
+                            output_format="JPEG",
+                        )
+                        raw_uint8 = (cv2.resize(result["raw_mask"], (DISP_W, disp_h)) * 255).astype(
+                            np.uint8
+                        )
+                        ph_raw.image(
+                            raw_uint8,
+                            caption="Masque brut",
+                            use_container_width=True,
+                            output_format="JPEG",
+                        )
                         fin_uint8 = (final_mask * 255).astype(np.uint8)
-                        ph_fin_mask.image(fin_uint8, caption="Masque final (post-proc)", use_container_width=True, output_format="JPEG")
+                        ph_fin_mask.image(
+                            fin_uint8,
+                            caption="Masque final (post-proc)",
+                            use_container_width=True,
+                            output_format="JPEG",
+                        )
                     else:
-                        ph_final.image(final, channels="RGB", use_container_width=True, output_format="JPEG")
+                        ph_final.image(
+                            final, channels="RGB", use_container_width=True, output_format="JPEG"
+                        )
 
                     fps_history.append(time.time() - loop_start)
                     if len(fps_history) > 30:
@@ -405,15 +415,15 @@ with tab_live:
                         avg_loop = sum(fps_history) / len(fps_history)
                         avg_inf = sum(inf_history) / len(inf_history) if inf_history else 0
                         model_fps = 1.0 / avg_inf if avg_inf > 0 else 0
-                        
+
                         # Affichage prioritaire pour le benchmark de production
                         inf_placeholder.metric("FPS Modèle (Brut)", f"{model_fps:.1f}")
                         fps_placeholder.metric("Latence Inférence", f"{avg_inf * 1000:.1f} ms")
-                        
+
                         st_debug.caption(
                             f"Frame {idx} | "
-                            f"Pipeline IA : {avg_inf*1000:.1f}ms ({model_fps:.1f} FPS) | "
-                            f"Overhead Streamlit : {(avg_loop - avg_inf)*1000:.1f}ms"
+                            f"Pipeline IA : {avg_inf * 1000:.1f}ms ({model_fps:.1f} FPS) | "
+                            f"Overhead Streamlit : {(avg_loop - avg_inf) * 1000:.1f}ms"
                         )
 
                 cap.release()
