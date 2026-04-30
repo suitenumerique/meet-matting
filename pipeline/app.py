@@ -43,7 +43,10 @@ upsamplers.discover("upsampling")
 skip_strategies.discover("skip_strategies")
 
 st.set_page_config(layout="wide", page_title="Matting Pipeline Lab")
-st.title("Background matting pipeline")
+
+col_title, col_download = st.columns([3, 1])
+with col_title:
+    st.title("Background matting pipeline")
 
 # ── Config Import ──────────────────────────────────────────────────────────────
 with st.sidebar.expander("Import Config", expanded=False):
@@ -68,7 +71,7 @@ with st.sidebar.expander("Import Config", expanded=False):
                 st.session_state["weights_path"] = config_to_apply["weights_path"]
 
             # Video matching
-            if "video_source" in config_to_apply:
+            if config_to_apply.get("video_source"):
                 from config import VIDEO_DIR
                 from core.video_io import list_videos
 
@@ -103,7 +106,34 @@ with st.sidebar.expander("Import Config", expanded=False):
         except Exception as e:
             st.error(f"Erreur lors de l'import : {e}")
 
+# ── Sidebar Selection ──────────────────────────────────────────────────────────
 selection = render_sidebar()
+
+# ── Config Export Button ───────────────────────────────────────────────────────
+config_to_save = {
+    "model_name": selection.model_name,
+    "weights_path": selection.weights_path,
+    "video_source": str(selection.video_path) if selection.video_path else None,
+    "model_params": selection.model_params,
+    "preprocessors": selection.preprocessors,
+    "postprocessors": selection.postprocessors,
+    "upsampler": selection.upsampler,
+    "bg_color": selection.bg_color,
+    "skip_frames": selection.skip_frames,
+    "skip_strategy": selection.skip_strategy,
+    "exported_at": datetime.now().isoformat(),
+}
+config_json = json.dumps(config_to_save, indent=4)
+
+with col_download:
+    st.download_button(
+        label="💾 Exporter Config (JSON)",
+        data=config_json,
+        file_name=f"config_{selection.model_name.lower().replace(' ', '_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+        mime="application/json",
+        use_container_width=True,
+        key="global_export_config"
+    )
 
 if selection.video_path is None:
     st.info("Drop a video into `data/videos/` to begin.")
