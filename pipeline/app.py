@@ -301,6 +301,7 @@ with tab_live:
                 else:
                     ph_final = st.empty()
 
+                ph_profiling = st.empty()
                 st_debug = st.empty()
 
                 bg_cache: dict = {}
@@ -408,13 +409,38 @@ with tab_live:
                         
                         # Affichage prioritaire pour le benchmark de production
                         inf_placeholder.metric("FPS Modèle (Brut)", f"{model_fps:.1f}")
-                        fps_placeholder.metric("Latence Inférence", f"{avg_inf * 1000:.1f} ms")
+                        fps_placeholder.metric("Latence Inférence", f"{avg_inf * 1000:.0f} ms")
                         
                         st_debug.caption(
                             f"Frame {idx} | "
                             f"Pipeline IA : {avg_inf*1000:.1f}ms ({model_fps:.1f} FPS) | "
                             f"Overhead Streamlit : {(avg_loop - avg_inf)*1000:.1f}ms"
                         )
+
+                        # Affichage du profiling détaillé sous forme de tableau
+                        if "timings" in result:
+                            t = result["timings"]
+                            table_md = "| Composant | Latence (ms) |\n| :--- | :--- |\n"
+                            
+                            # Section Pre
+                            for k, v in t.items():
+                                if k.startswith("pre_"):
+                                    table_md += f"| 🟢 Pre: {k[4:]} | {v*1000:.2f} |\n"
+                            
+                            # Section Modèle
+                            table_md += f"| 🧠 **Inférence IA** | **{t.get('model_inference', 0)*1000:.2f}** |\n"
+                            
+                            # Section Post
+                            for k, v in t.items():
+                                if k.startswith("post_"):
+                                    table_md += f"| 🔵 Post: {k[5:]} | {v*1000:.2f} |\n"
+                            
+                            # Section Rendu
+                            table_md += f"| 🎬 Composition | {t.get('compositing', 0)*1000:.2f} |\n"
+                            table_md += f"| --- | --- |\n"
+                            table_md += f"| ⏱️ **TOTAL PIPELINE** | **{t.get('total_pipeline', 0)*1000:.2f}** |"
+                            
+                            ph_profiling.markdown(table_md)
 
                 cap.release()
                 cam_status.info("Caméra arrêtée.")
