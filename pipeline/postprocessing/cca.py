@@ -1,6 +1,8 @@
 """
 Connected Component Analysis (CCA) post-processor.
 Removes small isolated mask islands (artifacts).
+
+Optimized: uses a vectorized LUT approach instead of per-component Python loops.
 """
 
 import cv2
@@ -34,32 +36,33 @@ class ConnectedComponents(Postprocessor):
         pass
 
     def __call__(self, mask: np.ndarray, original_frame: np.ndarray) -> np.ndarray:
-        if np.sum(mask) == 0:
+        # Fast exit: completely empty mask
+        if not np.any(mask > 0.0):
             return mask
 
-        # 1. Convert to binary u8 for robust component detection
-        # We use a mid-threshold (127) to isolate strong components
+        # 1. Binarize for robust component detection (uint8 for OpenCV)
         m_u8 = (mask * 255).astype(np.uint8)
         _, binary_mask = cv2.threshold(m_u8, 127, 255, cv2.THRESH_BINARY)
-        
+
         num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(binary_mask)
 
         if num_labels <= 1:
             return mask
 
-        # 2. Calculate total area of "confident" mask
-        total_area = np.sum(binary_mask > 0)
+        # 2. Vectorized LUT: build a keep/discard table for ALL labels at once
+        total_area = np.sum(stats[1:, cv2.CC_STAT_AREA])  # exclude background (label 0)
         if total_area == 0:
             return mask
 
-        refined_mask = mask.copy()
         min_area = total_area * self.params["min_area_ratio"]
 
-        # 3. Remove small components
-        for i in range(1, num_labels):
-            area = stats[i, cv2.CC_STAT_AREA]
-            if area < min_area:
-                # Zero out this component in the final soft mask
-                refined_mask[labels == i] = 0
+        # LUT: 1.0 = keep, 0.0 = discard.  Label 0 (background) always gets 0.
+        lut = np.zeros(num_labels, dtype=np.float32)
+        areas = stats[:, cv2.CC_STAT_AREA]
+        lut[1:] = (areas[1:] >= min_area).astype(np.float32)
 
-        return refined_mask
+        # 3. Apply LUT in one vectorized indexing op (no Python loop)
+        keep_mask = lut[labels]  # (H, W) float32, 0.0 or 1.0
+
+        # Multiply: preserves soft alpha values for kept components, zeros discarded
+        return mask * keep_mask

@@ -29,6 +29,12 @@ class MattingPipeline:
         self._bg_image = bg_image
         self._bg = np.array(bg_color, dtype=np.float32)[None, None, :]  # (1, 1, 3)
 
+        # ── Pre-allocated composition buffers (lazily sized on first frame) ──
+        self._buf_mask3: np.ndarray | None = None   # uint8 (H, W, 3)
+        self._buf_inv3: np.ndarray | None = None    # uint8 (H, W, 3)
+        self._bg_u8: np.ndarray | None = None       # uint8 (H, W, 3)
+        self._buf_shape: tuple[int, int] = (0, 0)   # (H, W) of last frame
+
     def reset(self):
         """Reset state of all components (counters, buffers, etc.)."""
         for pre in self.preprocessors:
@@ -115,33 +121,42 @@ class MattingPipeline:
             timings[f"post_{post.name}"] = time.perf_counter() - t_c_start
         timings["postprocessing_total"] = time.perf_counter() - t_post_start
 
-        # 4. Final Compositing (Optimized for CPU - In-place ops)
+        # 4. Final Compositing — uint8 fast path (OpenCV SIMD)
         t_comp_start = time.perf_counter()
-        
+
         if final_mask.ndim == 3:
             final_mask = final_mask.squeeze(-1)
-        
-        mask3 = final_mask[..., None]
-        
-        # Gestion du background (image ou couleur)
-        if self._bg_image is not None:
-            # Resize bg_image only if needed
-            if self._bg_image.shape[:2] != (h_orig, w_orig):
-                bg_ready = cv2.resize(self._bg_image, (w_orig, h_orig))
-            else:
-                bg_ready = self._bg_image
-            bg_ready = bg_ready.astype(np.float32)
-        else:
-            bg_ready = self._bg
 
-        # Formule : Result = Original * Mask + BG * (1 - Mask)
-        # On utilise une version in-place pour optimiser
-        final = original.astype(np.float32)
-        final *= mask3
-        final += bg_ready * (1.0 - mask3)
-        final = final.astype(np.uint8)
-        
+        # Lazy-allocate on resolution change
+        if self._buf_shape != (h_orig, w_orig):
+            self._buf_mask3 = np.empty((h_orig, w_orig, 3), dtype=np.uint8)
+            self._buf_inv3  = np.empty((h_orig, w_orig, 3), dtype=np.uint8)
+            self._buf_shape = (h_orig, w_orig)
+            # Pre-compute background as uint8 at target resolution (once)
+            if self._bg_image is not None:
+                bg = cv2.resize(self._bg_image, (w_orig, h_orig))
+                self._bg_u8 = bg if bg.dtype == np.uint8 else bg.astype(np.uint8)
+            else:
+                self._bg_u8 = np.full((h_orig, w_orig, 3), self._bg_color, dtype=np.uint8)
+
+        # mask float32 [0,1] → uint8 [0,255]  (single channel, cheap)
+        mask_u8 = np.clip(final_mask * 255.0, 0, 255).astype(np.uint8)
+
+        # Expand to 3 channels (contiguous memory for SIMD)
+        cv2.merge((mask_u8, mask_u8, mask_u8), dst=self._buf_mask3)
+        np.subtract(255, self._buf_mask3, out=self._buf_inv3)
+
+        # Alpha blend entirely in uint8:
+        #   fg = saturate_uint8(original * mask3 / 255)
+        #   bg = saturate_uint8(bg_u8 * inv_mask3 / 255)
+        #   final = fg + bg
+        _S = 1.0 / 255.0
+        fg = cv2.multiply(original, self._buf_mask3, scale=_S, dtype=cv2.CV_8U)
+        bg = cv2.multiply(self._bg_u8, self._buf_inv3, scale=_S, dtype=cv2.CV_8U)
+        final = cv2.add(fg, bg)
+
         timings["compositing"] = time.perf_counter() - t_comp_start
+
 
         # 5. Prepare debug view
         # We draw boxes on a separate debug frame
