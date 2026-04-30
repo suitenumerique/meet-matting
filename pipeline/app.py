@@ -404,9 +404,17 @@ with tab_live:
                     if idx % 5 == 0:
                         avg_loop = sum(fps_history) / len(fps_history)
                         avg_inf = sum(inf_history) / len(inf_history) if inf_history else 0
-                        fps_placeholder.metric("Live FPS", f"{1.0 / avg_loop:.1f}" if avg_loop > 0 else "—")
-                        inf_placeholder.metric("Inférence", f"{avg_inf * 1000:.0f} ms")
-                        st_debug.caption(f"Frame {idx} | Inférence: {avg_inf*1000:.1f}ms | Boucle: {avg_loop*1000:.1f}ms")
+                        model_fps = 1.0 / avg_inf if avg_inf > 0 else 0
+                        
+                        # Affichage prioritaire pour le benchmark de production
+                        inf_placeholder.metric("FPS Modèle (Brut)", f"{model_fps:.1f}")
+                        fps_placeholder.metric("Latence Inférence", f"{avg_inf * 1000:.1f} ms")
+                        
+                        st_debug.caption(
+                            f"Frame {idx} | "
+                            f"Pipeline IA : {avg_inf*1000:.1f}ms ({model_fps:.1f} FPS) | "
+                            f"Overhead Streamlit : {(avg_loop - avg_inf)*1000:.1f}ms"
+                        )
 
                 cap.release()
                 cam_status.info("Caméra arrêtée.")
