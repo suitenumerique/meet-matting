@@ -14,7 +14,7 @@ import numpy as np
 import streamlit as st
 from config import OUTPUT_DIR
 from core.pipeline import MattingPipeline
-from core.registry import models, postprocessors, preprocessors, skip_strategies, upsamplers
+from core.registry import compositors, models, postprocessors, preprocessors, skip_strategies, upsamplers
 from core.video_io import frame_count, read_frame
 from core.video_processing import process_video
 from ui.sidebar import _BG_IMAGE_URLS, render_sidebar
@@ -41,6 +41,7 @@ models.discover("models")
 postprocessors.discover("postprocessing")
 upsamplers.discover("upsampling")
 skip_strategies.discover("skip_strategies")
+compositors.discover("compositing")
 
 st.set_page_config(layout="wide", page_title="Matting Pipeline Lab")
 
@@ -163,9 +164,14 @@ if st.session_state.get("_model_key") != _model_key:
 model = st.session_state["_model"]
 pre_components = [preprocessors.get(name)(**params) for name, params in selection.preprocessors]
 post_components = [postprocessors.get(name)(**params) for name, params in selection.postprocessors]
+_comp_name, _comp_params = selection.compositor
+compositor_instance = compositors.get(_comp_name)(**_comp_params)
 bg_image = _load_bg_image(selection.bg_image_name) if selection.bg_image_name else None
 pipeline = MattingPipeline(
-    pre_components, model, post_components, bg_color=selection.bg_color, bg_image=bg_image
+    pre_components, model, post_components,
+    compositor=compositor_instance,
+    bg_color=selection.bg_color,
+    bg_image=bg_image,
 )
 
 # ── TABS ───────────────────────────────────────────────────────────────────────
@@ -406,15 +412,7 @@ with tab_live:
                             warped_mask = cam_skip_strategy(
                                 rgb_full, prev_frame_rgb, last_result["final_mask"]
                             )
-                            bg = pipeline._bg
-                            if bg.ndim == 3:
-                                fh, fw = rgb_full.shape[:2]
-                                if bg.shape[:2] != (fh, fw):
-                                    bg = cv2.resize(bg, (fw, fh), interpolation=cv2.INTER_LINEAR)
-                            final_composited = (
-                                rgb_full.astype(np.float32) * warped_mask[..., None]
-                                + bg.astype(np.float32) * (1.0 - warped_mask[..., None])
-                            ).clip(0, 255).astype(np.uint8)
+                            final_composited = pipeline.composite(rgb_full, warped_mask)
                             last_result = {
                                 **last_result,
                                 "final_mask": warped_mask,

@@ -143,6 +143,33 @@ class SkipStrategy(Component, ABC):
     ) -> np.ndarray: ...
 
 
+class Compositor(Component, ABC):
+    """Composites the masked foreground over the background.
+
+    Data contract:
+        composite receives:
+            fg:    np.ndarray, shape (H, W, 3), dtype uint8, RGB.
+            bg:    np.ndarray, shape (H, W, 3), dtype float32, range [0, 255].
+            alpha: np.ndarray, shape (H, W),   dtype float32, range [0, 1].
+        composite returns:
+            np.ndarray, shape (H, W, 3), dtype uint8, RGB.
+    """
+
+    @abstractmethod
+    def composite(self, fg: np.ndarray, bg: np.ndarray, alpha: np.ndarray) -> np.ndarray:
+        """Composite *fg* over *bg* using *alpha*.
+
+        Args:
+            fg:    Foreground RGB frame, shape (H, W, 3), dtype uint8.
+            bg:    Background, shape (H, W, 3), dtype float32, range [0, 255].
+                   Already resized to match fg by the pipeline.
+            alpha: Alpha matte, shape (H, W), dtype float32, range [0, 1].
+
+        Returns:
+            Composited image, shape (H, W, 3), dtype uint8.
+        """
+
+
 class UpsamplingMethod(Component, ABC):
     """Upsamples a low-resolution mask to the resolution of a high-resolution guide image.
 

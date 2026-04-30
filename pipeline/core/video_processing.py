@@ -97,17 +97,7 @@ def process_video(
                 else:
                     mask = prev_mask
 
-                mask3 = mask[..., None]
-                bg = pipeline._bg
-                if bg.ndim == 3:
-                    fh, fw = frame_rgb.shape[:2]
-                    if bg.shape[:2] != (fh, fw):
-                        bg = cv2.resize(bg, (fw, fh), interpolation=cv2.INTER_LINEAR)
-                final = (
-                    (frame_rgb.astype(np.float32) * mask3 + bg * (1.0 - mask3))
-                    .clip(0, 255)
-                    .astype(np.uint8)
-                )
+                final = pipeline.composite(frame_rgb, mask)
                 last_result = {
                     "final_mask": mask,
                     "final": final,
