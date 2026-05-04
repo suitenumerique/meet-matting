@@ -5,7 +5,14 @@ from pathlib import Path
 
 import streamlit as st
 from config import VIDEO_DIR
-from core.registry import compositors, models, postprocessors, preprocessors, skip_strategies, upsamplers
+from core.registry import (
+    compositors,
+    models,
+    postprocessors,
+    preprocessors,
+    skip_strategies,
+    upsamplers,
+)
 from core.video_io import list_videos
 
 from ui.widgets import render_component_config
@@ -121,7 +128,9 @@ def render_sidebar() -> SidebarSelection:
     # --- 5. Postprocessors ---
     with st.sidebar.expander("Postprocessors", expanded=False):
         st.caption("Refinements applied to the raw mask *after* the model, before compositing.")
-        post_names = [n for n in postprocessors.names() if not getattr(postprocessors.get(n), "hidden", False)]
+        post_names = [
+            n for n in postprocessors.names() if not getattr(postprocessors.get(n), "hidden", False)
+        ]
         chosen_post = st.multiselect(
             "Postprocessing steps (applied in order)",
             options=post_names,
@@ -210,4 +219,3 @@ def render_sidebar() -> SidebarSelection:
         preprocessors=pre_configs,
         postprocessors=post_configs,
     )
-

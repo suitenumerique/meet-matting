@@ -28,13 +28,13 @@ def _guided_filter(guide_rgb: np.ndarray, mask: np.ndarray, radius: int, eps: fl
     # Grayscale guide normalized to [0, 1] -- float32 throughout to avoid repeated casts
     guide = cv2.cvtColor(guide_rgb, cv2.COLOR_RGB2GRAY).astype(np.float32) * (1.0 / 255.0)
 
-    mean_I  = cv2.boxFilter(guide,        ddepth=-1, ksize=ksize)
-    mean_p  = cv2.boxFilter(mask,         ddepth=-1, ksize=ksize)
+    mean_I = cv2.boxFilter(guide, ddepth=-1, ksize=ksize)
+    mean_p = cv2.boxFilter(mask, ddepth=-1, ksize=ksize)
     mean_Ip = cv2.boxFilter(guide * mask, ddepth=-1, ksize=ksize)
     mean_II = cv2.boxFilter(guide * guide, ddepth=-1, ksize=ksize)
 
     cov_Ip = mean_Ip - mean_I * mean_p
-    var_I  = mean_II - mean_I * mean_I
+    var_I = mean_II - mean_I * mean_I
 
     a = cov_Ip / (var_I + eps)
     b = mean_p - a * mean_I

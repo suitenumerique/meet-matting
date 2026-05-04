@@ -6,7 +6,6 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-
 from core.base import MattingModel
 from core.parameters import ParameterSpec
 from core.registry import models
@@ -34,6 +33,7 @@ _LIMB_CONNECTIONS = [
 @models.register
 class MediapipePose(MattingModel):
     """Extraction rapide des membres pour le Limb-Lock."""
+
     name = "mediapipe_pose"
     description = "MediaPipe Pose Lite - Détecte les membres (utile pour le post-traitement)."
 
@@ -89,7 +89,7 @@ class MediapipePose(MattingModel):
             self.load()
 
         h, w = frame.shape[:2]
-        
+
         # Metal delegate on macOS prefers SRGBA
         frame_rgba = cv2.cvtColor(frame, cv2.COLOR_RGB2RGBA)
         mp_image = self._mp.Image(image_format=self._mp.ImageFormat.SRGBA, data=frame_rgba)
@@ -108,7 +108,7 @@ class MediapipePose(MattingModel):
                         pt1 = (int(start.x * w), int(start.y * h))
                         pt2 = (int(end.x * w), int(end.y * h))
                         cv2.line(mask, pt1, pt2, 255, thickness)
-        
+
         return mask.astype(np.float32) / 255.0
 
     def cleanup(self):

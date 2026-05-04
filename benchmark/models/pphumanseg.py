@@ -153,10 +153,9 @@ class PPHumanSegV2Wrapper(BaseModelWrapper):
         """
         Exécute l'inférence sur un lot de frames BGR.
         """
-        # Pour PP-HumanSeg, on réutilise predict car le batching natif ONNX 
+        # Pour PP-HumanSeg, on réutilise predict car le batching natif ONNX
         # compliquerait la gestion des différentes tailles d'entrée/padding.
         return [self.predict(f) for f in frames_bgr]
-
 
     def get_flops(self, input_shape: tuple[int, int, int] = (3, 192, 192)) -> float:
         # PP-HumanSeg V2 : ~90 MFLOPs à 192x192

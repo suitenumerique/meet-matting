@@ -7,15 +7,15 @@ Uses IMAGE mode to allow independent crop processing.
 import logging
 import urllib.request
 from pathlib import Path
-import cv2
-import numpy as np
-import mediapipe as mp
-from mediapipe.tasks.python import BaseOptions
-from mediapipe.tasks.python.vision import ImageSegmenter, ImageSegmenterOptions, RunningMode
 
+import cv2
+import mediapipe as mp
+import numpy as np
 from core.base import MattingModel
 from core.parameters import ParameterSpec
 from core.registry import models
+from mediapipe.tasks.python import BaseOptions
+from mediapipe.tasks.python.vision import ImageSegmenter, ImageSegmenterOptions, RunningMode
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +30,7 @@ _MODEL_URLS = {
         "selfie_segmenter_landscape.tflite"
     ),
 }
+
 
 class BaseMediapipeSelfie(MattingModel):
     _variant: str = ""
@@ -63,7 +64,9 @@ class BaseMediapipeSelfie(MattingModel):
             logger.info(f"Downloading MediaPipe {self._variant} model...")
             urllib.request.urlretrieve(_MODEL_URLS[self._variant], str(local_path))
 
-        delegate = BaseOptions.Delegate.GPU if self.params.get("gpu", True) else BaseOptions.Delegate.CPU
+        delegate = (
+            BaseOptions.Delegate.GPU if self.params.get("gpu", True) else BaseOptions.Delegate.CPU
+        )
 
         # CRITICAL: Use IMAGE mode for Person Zoom compatibility.
         # VIDEO mode's temporal memory fails when processing multiple crops per frame.
@@ -79,21 +82,22 @@ class BaseMediapipeSelfie(MattingModel):
     def infer(self, frame: np.ndarray) -> np.ndarray:
         if self._segmenter is None:
             self.load()
+        assert self._segmenter is not None
 
         try:
             h_orig, w_orig = frame.shape[:2]
-            
+
             # MediaPipe expects SRGBA for Metal/GPU
             frame_rgba = cv2.cvtColor(frame, cv2.COLOR_RGB2RGBA)
             mp_image = mp.Image(image_format=mp.ImageFormat.SRGBA, data=frame_rgba)
-            
+
             # Inference on single image (crop or full frame)
             result = self._segmenter.segment(mp_image)
 
             if result and result.confidence_masks:
                 # Get the alpha mask
                 mask = result.confidence_masks[0].numpy_view()
-                
+
                 # Resize to original input size (important for crops!)
                 if mask.shape[:2] != (h_orig, w_orig):
                     mask = cv2.resize(mask, (w_orig, h_orig), interpolation=cv2.INTER_LINEAR)
@@ -109,11 +113,13 @@ class BaseMediapipeSelfie(MattingModel):
             logger.error(f"MediaPipe {self._variant} inference error: {e}")
             return np.zeros((frame.shape[0], frame.shape[1]), dtype=np.float32)
 
+
 @models.register
 class MediapipePortrait(BaseMediapipeSelfie):
     name = "mediapipe_portrait"
     description = "MediaPipe Selfie Segmenter - Portrait (optimisé pour les visages proches)."
     _variant = "portrait"
+
 
 @models.register
 class MediapipeLandscape(BaseMediapipeSelfie):

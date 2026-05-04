@@ -121,7 +121,7 @@ class PersonZoom(Preprocessor):
                 raw_bboxes = self.yolo_detector.detect(frame, padding=padding)
                 # Extend box to bottom if person is significant (> 5% height)
                 extended = []
-                for (x1, y1, x2, y2) in raw_bboxes:
+                for x1, y1, x2, y2 in raw_bboxes:
                     box_h = y2 - y1
                     # FALLBACK: If person covers > 70% of frame, don't crop (use full width)
                     if box_h / h_img > 0.7:
@@ -135,19 +135,19 @@ class PersonZoom(Preprocessor):
                 face_bboxes = self.face_detector.detect(frame)
                 raw_bboxes = []
                 h_img, w_img = frame.shape[:2]
-                for (fx1, fy1, fx2, fy2) in face_bboxes:
+                for fx1, fy1, fx2, fy2 in face_bboxes:
                     fw, fh = fx2 - fx1, fy2 - fy1
                     fcx = (fx1 + fx2) / 2
-                    
+
                     # More generous expansion for close-up
                     rel_h = fh / h_img
-                    pad_top = 1.5 if rel_h < 0.3 else 2.0 # More air when close
-                    
+                    pad_top = 1.5 if rel_h < 0.3 else 2.0  # More air when close
+
                     bx1 = max(0, fcx - fw * 3.0)
                     bx2 = min(w_img, fcx + fw * 3.0)
                     by1 = max(0, fy1 - fh * pad_top)
                     by2 = h_img
-                    
+
                     # Fallback if box is too big
                     if (by2 - by1) / h_img > 0.8:
                         raw_bboxes.append((0, 0, w_img, h_img))
@@ -160,7 +160,9 @@ class PersonZoom(Preprocessor):
             max_p = self.params.get("max_persons", 2)
             if len(raw_bboxes) > max_p:
                 # Sort by area (descending) to keep the closest/largest people
-                raw_bboxes = sorted(raw_bboxes, key=lambda b: (b[2]-b[0]) * (b[3]-b[1]), reverse=True)[:max_p]
+                raw_bboxes = sorted(
+                    raw_bboxes, key=lambda b: (b[2] - b[0]) * (b[3] - b[1]), reverse=True
+                )[:max_p]
 
             self.last_bboxes = self._update_smoothed_boxes(raw_bboxes, alpha, hysteresis)
 
@@ -210,38 +212,42 @@ class PersonZoom(Preprocessor):
             if best_idx != -1:
                 raw_box = raw_bboxes[best_idx]
                 used_raw.add(best_idx)
-                
+
                 # 1. Asymmetric EMA Smoothing
                 # Growth is faster than shrinkage to avoid clipping
                 for i in range(4):
                     target = raw_box[i]
                     current = old_box[i]
-                    
+
                     # If expanding (x1 decreasing, x2 increasing, etc.)
                     is_expanding = False
-                    if i == 0 and target < current: is_expanding = True # x1
-                    if i == 1 and target < current: is_expanding = True # y1
-                    if i == 2 and target > current: is_expanding = True # x2
-                    if i == 3 and target > current: is_expanding = True # y2
-                    
+                    if i == 0 and target < current:
+                        is_expanding = True  # x1
+                    if i == 1 and target < current:
+                        is_expanding = True  # y1
+                    if i == 2 and target > current:
+                        is_expanding = True  # x2
+                    if i == 3 and target > current:
+                        is_expanding = True  # y2
+
                     # Use higher alpha for expansion
                     effective_alpha = min(1.0, alpha * 2.5) if is_expanding else alpha
                     old_box[i] = current * (1 - effective_alpha) + target * effective_alpha
-                
+
                 smoothed = old_box
-                
+
                 # 2. Hysteresis on size to prevent "pumping"
                 old_w = old_box[2] - old_box[0]
                 old_h = old_box[3] - old_box[1]
                 new_w = smoothed[2] - smoothed[0]
                 new_h = smoothed[3] - smoothed[1]
-                
+
                 # Only apply hysteresis if shrinking
                 if new_w < old_w and (old_w - new_w) / max(old_w, 1) < hysteresis:
                     cx = (smoothed[0] + smoothed[2]) / 2
                     smoothed[0] = cx - old_w / 2
                     smoothed[2] = cx + old_w / 2
-                
+
                 if new_h < old_h and (old_h - new_h) / max(old_h, 1) < hysteresis:
                     cy = (smoothed[1] + smoothed[3]) / 2
                     smoothed[1] = cy - old_h / 2

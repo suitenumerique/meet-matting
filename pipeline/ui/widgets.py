@@ -7,8 +7,8 @@ def render_widget(spec: ParameterSpec, key: str):
     if spec.type == "int":
         return st.slider(
             spec.label,
-            int(spec.min_value),
-            int(spec.max_value),
+            int(spec.min_value or 0),
+            int(spec.max_value or 100),
             int(spec.default),
             int(spec.step or 1),
             help=spec.help,
@@ -17,8 +17,8 @@ def render_widget(spec: ParameterSpec, key: str):
     if spec.type == "float":
         return st.slider(
             spec.label,
-            float(spec.min_value),
-            float(spec.max_value),
+            float(spec.min_value or 0.0),
+            float(spec.max_value or 1.0),
             float(spec.default),
             float(spec.step or 0.01),
             help=spec.help,
@@ -27,8 +27,9 @@ def render_widget(spec: ParameterSpec, key: str):
     if spec.type == "bool":
         return st.checkbox(spec.label, bool(spec.default), help=spec.help, key=key)
     if spec.type == "choice":
-        idx = spec.choices.index(spec.default) if spec.default in spec.choices else 0
-        return st.selectbox(spec.label, spec.choices, index=idx, help=spec.help, key=key)
+        choices = spec.choices or []
+        idx = choices.index(spec.default) if spec.default in choices else 0
+        return st.selectbox(spec.label, choices, index=idx, help=spec.help, key=key)
     return st.text_input(spec.label, str(spec.default), help=spec.help, key=key)
 
 

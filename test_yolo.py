@@ -1,6 +1,7 @@
-import cv2
-import numpy as np
 import time
+
+import numpy as np
+
 from pipeline.core.detector import YoloDetector
 
 print("Initializing YOLO...")
@@ -16,5 +17,5 @@ t0 = time.time()
 boxes = yolo.detect(frame)
 t1 = time.time()
 
-print(f"Detected {len(boxes)} boxes in {t1-t0:.3f}s")
+print(f"Detected {len(boxes)} boxes in {t1 - t0:.3f}s")
 print("Done.")

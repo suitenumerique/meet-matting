@@ -184,15 +184,16 @@ class UpsamplingMethod(Component, ABC):
     def upsample(self, low_res_mask: np.ndarray, guide: np.ndarray) -> np.ndarray:
         """Upsample *low_res_mask* to the resolution of *guide* with profiling."""
         import time
+
         from core import context
-        
+
         t_start = time.perf_counter()
         result = self._upsample_impl(low_res_mask, guide)
-        
+
         # On accumule le temps (utile si plusieurs upsamplings par frame, ex: Person Zoom)
         current = context.get_val("upsampling_time", 0.0)
         context.set_val("upsampling_time", current + (time.perf_counter() - t_start))
-        
+
         return result
 
     @abstractmethod

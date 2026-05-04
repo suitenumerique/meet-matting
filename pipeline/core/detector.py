@@ -57,6 +57,7 @@ class PersonDetector:
         """Detect persons and return bboxes (x1, y1, x2, y2)."""
         if self._detector is None:
             self.load()
+        assert self._detector is not None
 
         h, w = frame_rgb.shape[:2]
         mp_image = self._mp.Image(image_format=self._mp.ImageFormat.SRGB, data=frame_rgb)
@@ -124,6 +125,7 @@ class PoseDetector:
         """Detect persons using keypoints and return bboxes (x1, y1, x2, y2)."""
         if self._landmarker is None:
             self.load()
+        assert self._landmarker is not None
 
         h, w = frame_rgb.shape[:2]
         mp_image = self._mp.Image(image_format=self._mp.ImageFormat.SRGB, data=frame_rgb)
@@ -161,9 +163,9 @@ class PoseDetector:
 
 class YoloDetector:
     """Uses Ultralytics YOLO11 for high-performance person detection."""
-    
+
     # Class-level cache to avoid reloading the model
-    _MODEL_CACHE = {}
+    _MODEL_CACHE: dict[tuple[str, float], tuple[object, str]] = {}
 
     def __init__(self, model_size: str = "n", score_threshold: float = 0.25):
         self._model = None
@@ -178,15 +180,14 @@ class YoloDetector:
             return
 
         try:
-            import torch
             from ultralytics import YOLO
-            
+
             # CRITICAL FIX: DO NOT use MPS for YOLO on Mac.
-            # PyTorch's NMS (Non-Maximum Suppression) operation on MPS 
+            # PyTorch's NMS (Non-Maximum Suppression) operation on MPS
             # currently causes massive hangs (> 8 seconds) and freezes the app.
             # We strictly force CPU, which is actually very fast for YOLO Nano.
             self._device = "cpu"
-                
+
             logger.info(f"YOLO11 loading on device: {self._device} (MPS disabled for stability)")
         except ImportError as e:
             raise ImportError(
@@ -201,7 +202,7 @@ class YoloDetector:
         model = YOLO(str(model_path))
         model.to(self._device)
         # Note: Keeping half=False for stability against 'gray screen' issues
-            
+
         self._model = model
         self._MODEL_CACHE[cache_key] = (self._model, self._device)
 
@@ -211,6 +212,7 @@ class YoloDetector:
         """Detect persons using YOLO and return bboxes (x1, y1, x2, y2)."""
         if self._model is None:
             self.load()
+        assert self._model is not None
 
         h, w = frame_rgb.shape[:2]
 
@@ -222,8 +224,8 @@ class YoloDetector:
             classes=[0],  # 0 is 'person' in COCO
             verbose=False,
             device=self._device,
-            imgsz=320, 
-            half=False, 
+            imgsz=320,
+            half=False,
         )
 
         bboxes = []
@@ -245,7 +247,7 @@ class YoloDetector:
 
                     if fx2 > fx1 and fy2 > fy1:
                         bboxes.append((fx1, fy1, fx2, fy2))
-        
+
         if not bboxes:
             logger.debug(f"YOLO: No person detected (device={self._device})")
         else:
@@ -292,6 +294,7 @@ class FaceDetector:
         """Detect faces and return bboxes (x1, y1, x2, y2)."""
         if self._detector is None:
             self.load()
+        assert self._detector is not None
 
         h, w = frame_rgb.shape[:2]
         mp_image = self._mp.Image(image_format=self._mp.ImageFormat.SRGB, data=frame_rgb)

@@ -4,6 +4,7 @@ from core.base import Postprocessor
 from core.parameters import ParameterSpec
 from core.registry import postprocessors
 
+
 @postprocessors.register
 class BoundaryBlur(Postprocessor):
     name = "boundary_blur"
@@ -61,22 +62,22 @@ class BoundaryBlur(Postprocessor):
         # We use dilation - erosion to find the contour
         ksize = int(self.params["edge_width"])
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ksize, ksize))
-        
+
         # Working with uint8 for efficiency in morphological ops
         m_u8 = (mask * 255).astype(np.uint8)
         dilated = cv2.dilate(m_u8, kernel)
         eroded = cv2.erode(m_u8, kernel)
         boundary_zone = (dilated - eroded).astype(np.float32) / 255.0
-        
+
         # 2. Apply Gaussian Blur (Separable) to the whole mask
         sigma = self.params["sigma"]
         # Kernel size is usually 4*sigma + 1
         k_blur = int(4 * sigma + 1) | 1
         blurred_mask = cv2.GaussianBlur(mask, (k_blur, k_blur), sigma)
-        
+
         # 3. Weighted Mix: Result = Original + (Blurred - Original) * BoundaryZone * MixFactor
         # This ensures that only the boundary zone is affected.
         mix = self.params["mix_factor"]
         result = mask + (blurred_mask - mask) * boundary_zone * mix
-        
+
         return np.clip(result, 0.0, 1.0)

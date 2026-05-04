@@ -1,4 +1,3 @@
-from __future__ import annotations
 """
 Classe de base abstraite pour tous les wrappers de modèles de segmentation.
 
@@ -9,6 +8,8 @@ Chaque modèle DOIT implémenter :
   - cleanup()    : Libération des ressources GPU/mémoire.
   - get_flops()  : Estimation ou mesure des FLOPs par frame.
 """
+
+from __future__ import annotations
 
 from abc import ABC, abstractmethod
 

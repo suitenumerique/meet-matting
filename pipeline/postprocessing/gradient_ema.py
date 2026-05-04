@@ -33,6 +33,7 @@ Rationale
 All operations are vectorised over (H, W) with NumPy and OpenCV.
 No Python loops over pixels.
 """
+
 from __future__ import annotations
 
 import cv2

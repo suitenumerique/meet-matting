@@ -6,7 +6,6 @@ from typing import Any
 import cv2
 import numpy as np
 from core.base import MattingModel
-from core.parameters import ParameterSpec
 from core.registry import models
 
 logger = logging.getLogger(__name__)
@@ -71,7 +70,7 @@ class PPHumanSegV2(MattingModel):
 
     def infer(self, frame: np.ndarray) -> np.ndarray:
         """Run inference on a single frame.
-        
+
         This model expects 192x192 float32 input with normalization (mean=0.5, std=0.5).
         It handles its own resizing and upsampling to be self-contained.
         """
@@ -115,4 +114,3 @@ class PPHumanSegV2(MattingModel):
         mask_full = cv2.resize(mask_valid, (w_orig, h_orig), interpolation=cv2.INTER_LINEAR)
 
         return mask_full.astype(np.float32)
-

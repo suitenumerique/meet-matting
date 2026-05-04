@@ -14,7 +14,14 @@ import numpy as np
 import streamlit as st
 from config import OUTPUT_DIR
 from core.pipeline import MattingPipeline
-from core.registry import compositors, models, postprocessors, preprocessors, skip_strategies, upsamplers
+from core.registry import (
+    compositors,
+    models,
+    postprocessors,
+    preprocessors,
+    skip_strategies,
+    upsamplers,
+)
 from core.video_io import frame_count, read_frame
 from core.video_processing import process_video
 from ui.sidebar import _BG_IMAGE_URLS, render_sidebar
@@ -30,6 +37,8 @@ def _load_bg_image(name: str) -> np.ndarray | None:
     try:
         resp = urllib.request.urlopen(url)
         img = cv2.imdecode(np.asarray(bytearray(resp.read()), dtype="uint8"), 1)
+        if img is None:
+            return None
         return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
     except Exception:
         return None
@@ -63,6 +72,7 @@ with st.sidebar.expander("Import Config", expanded=False):
 
     if should_apply:
         try:
+            assert uploaded_config is not None
             config_to_apply = json.load(uploaded_config)
 
             # Basic keys
@@ -133,7 +143,7 @@ with col_download:
         file_name=f"config_{selection.model_name.lower().replace(' ', '_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
         mime="application/json",
         use_container_width=True,
-        key="global_export_config"
+        key="global_export_config",
     )
 
 if selection.video_path is None:
@@ -168,7 +178,9 @@ _comp_name, _comp_params = selection.compositor
 compositor_instance = compositors.get(_comp_name)(**_comp_params)
 bg_image = _load_bg_image(selection.bg_image_name) if selection.bg_image_name else None
 pipeline = MattingPipeline(
-    pre_components, model, post_components,
+    pre_components,
+    model,
+    post_components,
     compositor=compositor_instance,
     bg_color=selection.bg_color,
     bg_image=bg_image,
@@ -367,13 +379,13 @@ with tab_live:
                 cam_skip_strategy = skip_strategies.get(_skip_name)(**_skip_params)
 
                 # Inject the first frame we already read above
-                frames_to_process = [bgr_test]
+                cam_init_frames: list[np.ndarray] = [bgr_test]
 
                 while True:
                     loop_start = time.time()
 
-                    if frames_to_process:
-                        bgr = frames_to_process.pop(0)
+                    if cam_init_frames:
+                        bgr = cam_init_frames.pop(0)
                     else:
                         ret, bgr = cap.read()
                         if not ret:
@@ -474,7 +486,7 @@ with tab_live:
                         # Affichage prioritaire pour le benchmark de production
                         inf_placeholder.metric("FPS Modèle (Brut)", f"{model_fps:.1f}")
                         fps_placeholder.metric("Latence Inférence", f"{avg_inf * 1000:.0f} ms")
-                        
+
                         st_debug.caption(
                             f"Frame {idx} | "
                             f"Pipeline IA : {avg_inf * 1000:.1f}ms ({model_fps:.1f} FPS) | "
@@ -485,30 +497,33 @@ with tab_live:
                         if "timings" in result:
                             t = result["timings"]
                             table_md = "| Composant | Latence (ms) |\n| :--- | :--- |\n"
-                            
+
                             # Section Pre
                             for k, v in t.items():
                                 if k.startswith("pre_"):
-                                    table_md += f"| 🟢 Pre: {k[4:]} | {v*1000:.2f} |\n"
-                            
+                                    table_md += f"| 🟢 Pre: {k[4:]} | {v * 1000:.2f} |\n"
+
                             # Section Modèle
-                            table_md += f"| 🧠 **Inférence IA** | **{t.get('model_inference', 0)*1000:.2f}** |\n"
-                            
+                            table_md += f"| 🧠 **Inférence IA** | **{t.get('model_inference', 0) * 1000:.2f}** |\n"
+
                             # Section Upsampling
-                            table_md += f"| ⬆️ **Upsampling** | **{t.get('upsampling', 0)*1000:.2f}** |\n"
-                            
+                            table_md += (
+                                f"| ⬆️ **Upsampling** | **{t.get('upsampling', 0) * 1000:.2f}** |\n"
+                            )
+
                             # Section Post
                             for k, v in t.items():
                                 if k.startswith("post_"):
-                                    table_md += f"| 🔵 Post: {k[5:]} | {v*1000:.2f} |\n"
-                            
+                                    table_md += f"| 🔵 Post: {k[5:]} | {v * 1000:.2f} |\n"
+
                             # Section Rendu
-                            table_md += f"| 🎬 Composition | {t.get('compositing', 0)*1000:.2f} |\n"
-                            table_md += f"| --- | --- |\n"
-                            table_md += f"| ⏱️ **TOTAL PIPELINE** | **{t.get('total_pipeline', 0)*1000:.2f}** |"
-                            
+                            table_md += (
+                                f"| 🎬 Composition | {t.get('compositing', 0) * 1000:.2f} |\n"
+                            )
+                            table_md += "| --- | --- |\n"
+                            table_md += f"| ⏱️ **TOTAL PIPELINE** | **{t.get('total_pipeline', 0) * 1000:.2f}** |"
+
                             ph_profiling.markdown(table_md)
 
                 cap.release()
                 cam_status.info("Caméra arrêtée.")
-

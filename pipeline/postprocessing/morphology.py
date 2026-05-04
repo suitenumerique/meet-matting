@@ -7,23 +7,21 @@ from core.registry import postprocessors
 # Map readable names to cv2 morphological shape constants.
 _SHAPE_MAP: dict[str, int] = {
     "ELLIPSE": cv2.MORPH_ELLIPSE,
-    "RECT":    cv2.MORPH_RECT,
-    "CROSS":   cv2.MORPH_CROSS,
+    "RECT": cv2.MORPH_RECT,
+    "CROSS": cv2.MORPH_CROSS,
 }
 
 
 def _make_kernel(size: int, shape: str) -> np.ndarray:
     """Return a structuring element of the given odd *size* and *shape*."""
-    size = max(1, size | 1)   # force odd value; minimum 1
+    size = max(1, size | 1)  # force odd value; minimum 1
     return cv2.getStructuringElement(_SHAPE_MAP[shape], (size, size))
 
 
 @postprocessors.register
 class MorphologyCleanup(Postprocessor):
     name = "morphology"
-    description = (
-        "Closes internal holes then removes peripheral noise (configurable kernel sizes)."
-    )
+    description = "Closes internal holes then removes peripheral noise (configurable kernel sizes)."
     details = (
         "Reference: van Herk (1992) / Gil & Werman (1993).\n"
         "Closing (dilation then erosion): fills small gaps inside the mask.\n"
@@ -88,10 +86,10 @@ class MorphologyCleanup(Postprocessor):
 
     def __call__(self, mask: np.ndarray, original_frame: np.ndarray) -> np.ndarray:
         close_size = int(self.params["close_size"])
-        open_size  = int(self.params["open_size"])
-        shape      = self.params["kernel_shape"]
-        iters      = int(self.params["iterations"])
-        order      = self.params["order"]
+        open_size = int(self.params["open_size"])
+        shape = self.params["kernel_shape"]
+        iters = int(self.params["iterations"])
+        order = self.params["order"]
 
         if close_size == 0 and open_size == 0:
             return mask

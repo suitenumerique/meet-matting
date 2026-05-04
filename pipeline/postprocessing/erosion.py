@@ -33,5 +33,5 @@ class Erosion(Postprocessor):
         size = 2 * radius + 1
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (size, size))
         m_u8 = (mask * 255.0).astype(np.uint8)
-        m_u8 = cv2.erode(m_u8, kernel)
-        return m_u8.astype(np.float32) * (1.0 / 255.0)
+        eroded = cv2.erode(m_u8, kernel)
+        return eroded.astype(np.float32) * (1.0 / 255.0)

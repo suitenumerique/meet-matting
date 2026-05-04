@@ -79,7 +79,8 @@ class ConnectedComponents(Postprocessor):
         if total_area == 0:
             return mask
 
-        min_area = total_area * self.params["min_area_ratio"]
+        frame_area = mask.shape[0] * mask.shape[1]
+        min_area = frame_area * (self.params["min_area_pct"] / 100.0)
 
         # LUT: 1.0 = keep, 0.0 = discard.  Label 0 (background) always gets 0.
         lut = np.zeros(num_labels, dtype=np.float32)

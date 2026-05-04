@@ -80,11 +80,11 @@ class LightWrap(Compositor):
         edge_width = int(self.params["edge_width"])
 
         # ── 1. Alpha blend base à pleine résolution (in-place) ────────────
-        fg_f = fg.astype(np.float32)   # [0, 255] — seule allocation full-res
+        fg_f = fg.astype(np.float32)  # [0, 255] — seule allocation full-res
         mask3 = alpha[..., np.newaxis]
-        fg_f -= bg       # fg − bg
-        fg_f *= mask3    # (fg − bg) · α
-        fg_f += bg       # base = bg + (fg − bg) · α
+        fg_f -= bg  # fg − bg
+        fg_f *= mask3  # (fg − bg) · α
+        fg_f += bg  # base = bg + (fg − bg) · α
 
         # ── 2. Wrap à mi-résolution (4× moins de pixels) ──────────────────
         hs, ws = max(1, h // 2), max(1, w // 2)
@@ -100,24 +100,24 @@ class LightWrap(Compositor):
             cv2.GaussianBlur(bg_sub, (k_small, k_small), 0),
             (ws, hs),
             interpolation=cv2.INTER_LINEAR,
-        )  # [0, 255] float32
+        ).astype(np.float32)  # [0, 255] float32
 
         # Zone de bord à mi-résolution : dilate − alpha
         a_s = cv2.resize(alpha, (ws, hs), interpolation=cv2.INTER_LINEAR)
         k_edge = max(3, (edge_width // 2) * 2 + 1)
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k_edge, k_edge))
-        dil_s = cv2.dilate(a_s, kernel)
-        dil_s -= a_s                          # anneau de bord [0, 1] in-place
+        dil_s = cv2.dilate(a_s, kernel).astype(np.float32)
+        dil_s -= a_s  # anneau de bord [0, 1] in-place
         np.clip(dil_s, 0.0, 1.0, out=dil_s)
 
         # Contribution nette du wrap : B·(1 − A/255)
         #   B = fond_flouté · zone_bord · intensité   [0, 255]
         #   wrap = B − A·B/255                        screen net contribution
-        dil_s *= amount                               # scale in-place
-        bg_glow_s *= dil_s[..., np.newaxis]           # B in-place
+        dil_s *= amount  # scale in-place
+        bg_glow_s *= dil_s[..., np.newaxis]  # B in-place
         temp_s = fg_s * bg_glow_s
-        temp_s /= 255.0                               # A·B/255
-        bg_glow_s -= temp_s                           # wrap = B·(1 − A/255)
+        temp_s /= 255.0  # A·B/255
+        bg_glow_s -= temp_s  # wrap = B·(1 − A/255)
 
         # ── 3. Upscale wrap et addition sur le composite pleine résolution ─
         wrap = cv2.resize(bg_glow_s, (w, h), interpolation=cv2.INTER_LINEAR)

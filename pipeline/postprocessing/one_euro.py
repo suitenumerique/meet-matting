@@ -14,6 +14,7 @@ Adaptive cutoff per pixel:
     a[p]      = 1 / (1 + tau[p] * f_s)   where tau[p] = 1/(2*pi*f_c[p])    (EMA coefficient)
     x_hat[p]  = a[p] * mask[p] + (1 - a[p]) * x_hat[p]                      (filtered estimate)
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -26,9 +27,7 @@ from core.registry import postprocessors
 @postprocessors.register
 class OneEuroFilterMask(Postprocessor):
     name = "one_euro"
-    description = (
-        "Adaptive low-pass filter: strong smoothing at rest, low lag during motion."
-    )
+    description = "Adaptive low-pass filter: strong smoothing at rest, low lag during motion."
     details = (
         "Reference: Casiez, Roussel, Vogel (CHI 2012).\n"
         "Principle: per-pixel EMA whose cutoff frequency f_c rises with signal speed.\n"
@@ -111,16 +110,17 @@ class OneEuroFilterMask(Postprocessor):
         dx_raw = (mask - self._x_hat) * f_s
 
         # EMA on the derivative with a fixed cutoff d_cutoff.
-        a_d = alpha_from_cutoff(d_cutoff, f_s)   # scalar; same for all pixels
+        a_d = alpha_from_cutoff(d_cutoff, f_s)  # scalar; same for all pixels
+        assert self._dx_hat is not None
         self._dx_hat = a_d * dx_raw + (1.0 - a_d) * self._dx_hat
 
         # --- Adaptive per-pixel cutoff --------------------------------------
         # f_c[p] = min_cutoff + beta * |dx_hat[p]|
-        f_c = min_cutoff + beta * np.abs(self._dx_hat)       # shape (H, W)
+        f_c = min_cutoff + beta * np.abs(self._dx_hat)  # shape (H, W)
 
         # alpha[p] = 1 / (1 + tau[p] * f_s)  where tau = 1/(2*pi*f_c)
         tau = 1.0 / (2.0 * np.pi * f_c)
-        a = 1.0 / (1.0 + tau * f_s)                          # shape (H, W)
+        a = 1.0 / (1.0 + tau * f_s)  # shape (H, W)
 
         # --- Position EMA ---------------------------------------------------
         self._x_hat = a * mask + (1.0 - a) * self._x_hat

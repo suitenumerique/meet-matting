@@ -36,7 +36,7 @@ class MattingPipeline:
         """Return background resized to (h, w) if needed."""
         bg = self._bg
         if bg.ndim == 3 and bg.shape[:2] != (h, w):
-            bg = cv2.resize(bg, (w, h), interpolation=cv2.INTER_LINEAR)
+            bg = cv2.resize(bg, (w, h), interpolation=cv2.INTER_LINEAR).astype(np.float32)
         return bg
 
     def composite(self, fg: np.ndarray, alpha: np.ndarray) -> np.ndarray:
@@ -60,6 +60,7 @@ class MattingPipeline:
     def process_frame(self, frame: np.ndarray) -> dict:
         """Run the full pipeline on one frame with detailed profiling."""
         import time
+
         timings = {}
         t_start = time.perf_counter()
 
@@ -149,19 +150,43 @@ class MattingPipeline:
         if zoom_active:
             for x1, y1, x2, y2 in bboxes:
                 cv2.rectangle(debug_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                cv2.putText(debug_frame, "ZOOM", (x1, y1-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+                cv2.putText(
+                    debug_frame, "ZOOM", (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1
+                )
 
         # Draw Pose Landmarks
         if context.get_val("show_landmarks") and context.get_val("pose_landmarks"):
             all_pose_landmarks = context.get_val("pose_landmarks")
             h, w = debug_frame.shape[:2]
 
-            connections = [(11, 12), (11, 13), (13, 15), (12, 14), (14, 16), (23, 24), (23, 25), (25, 27), (24, 26), (26, 28), (11, 23), (12, 24), (0, 1), (1, 2), (2, 3), (0, 4), (4, 5), (5, 6)]
+            connections = [
+                (11, 12),
+                (11, 13),
+                (13, 15),
+                (12, 14),
+                (14, 16),
+                (23, 24),
+                (23, 25),
+                (25, 27),
+                (24, 26),
+                (26, 28),
+                (11, 23),
+                (12, 24),
+                (0, 1),
+                (1, 2),
+                (2, 3),
+                (0, 4),
+                (4, 5),
+                (5, 6),
+            ]
             for pose_landmarks in all_pose_landmarks:
                 for start_idx, end_idx in connections:
                     if start_idx < len(pose_landmarks) and end_idx < len(pose_landmarks):
                         p1, p2 = pose_landmarks[start_idx], pose_landmarks[end_idx]
-                        if getattr(p1, "visibility", 1.0) > 0.5 and getattr(p2, "visibility", 1.0) > 0.5:
+                        if (
+                            getattr(p1, "visibility", 1.0) > 0.5
+                            and getattr(p2, "visibility", 1.0) > 0.5
+                        ):
                             c1, c2 = (int(p1.x * w), int(p1.y * h)), (int(p2.x * w), int(p2.y * h))
                             cv2.line(debug_frame, c1, c2, (0, 255, 255), 2)
                 for lm in pose_landmarks:

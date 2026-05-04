@@ -47,15 +47,14 @@ class CLAHE(Preprocessor):
         # Convert RGB to LAB to apply CLAHE only to the L channel (luminance)
         # This avoids changing the color balance.
         lab = cv2.cvtColor(frame, cv2.COLOR_RGB2LAB)
-        l, a, b = cv2.split(lab)
+        l_channel, a, b = cv2.split(lab)
 
         grid_size = self.params["tile_grid_size"]
         clahe = cv2.createCLAHE(
-            clipLimit=self.params["clip_limit"], 
-            tileGridSize=(grid_size, grid_size)
+            clipLimit=self.params["clip_limit"], tileGridSize=(grid_size, grid_size)
         )
-        
-        cl = clahe.apply(l)
+
+        cl = clahe.apply(l_channel)
 
         # Merge the CLAHE enhanced L-channel back with A and B channels
         limg = cv2.merge((cl, a, b))

@@ -9,14 +9,15 @@ stabilise landmark coordinates, bounding-box positions, or any continuous
 signal. For dense pixel-array smoothing see postprocessing/one_euro.py which
 vectorises the same mathematics over numpy arrays.
 """
+
 from __future__ import annotations
 
 import math
 
-
 # ---------------------------------------------------------------------------
 # Internal helper -- shared by this module and postprocessing/one_euro.py
 # ---------------------------------------------------------------------------
+
 
 def alpha_from_cutoff(cutoff: float, f_s: float) -> float:
     """Return the EMA coefficient for a given cutoff frequency and sample rate.
@@ -34,6 +35,7 @@ def alpha_from_cutoff(cutoff: float, f_s: float) -> float:
 # ---------------------------------------------------------------------------
 # 1-D scalar filter
 # ---------------------------------------------------------------------------
+
 
 class OneEuroFilter1D:
     """One Euro Filter applied to a scalar (1-D) signal.
@@ -107,6 +109,7 @@ class OneEuroFilter1D:
 # ---------------------------------------------------------------------------
 # Multi-dimensional wrappers
 # ---------------------------------------------------------------------------
+
 
 class OneEuroFilter2D:
     """One Euro Filter for a 2-D coordinate (x, y).

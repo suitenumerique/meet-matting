@@ -33,6 +33,7 @@ Algorithm
    fully). When the scene is nearly static, alpha stays near alpha_min
    (warp contributes more, smoothing temporal noise).
 """
+
 from __future__ import annotations
 
 import cv2
@@ -46,9 +47,7 @@ from core.registry import postprocessors
 class OpticalFlowWarp(Postprocessor):
     name = "optical_flow_warp"
     hidden = True  # disponible en skip strategy — masqué dans post-process
-    description = (
-        "Warp the previous mask with DIS optical flow before blending to remove ghosting."
-    )
+    description = "Warp the previous mask with DIS optical flow before blending to remove ghosting."
     details = (
         "Reference: Kroeger et al. (ECCV 2016) -- DIS optical flow.\n"
         "Algorithm:\n"
@@ -129,8 +128,8 @@ class OpticalFlowWarp(Postprocessor):
 
     def __call__(self, mask: np.ndarray, original_frame: np.ndarray) -> np.ndarray:
         alpha_min = float(self.params["alpha_min"])
-        adaptive  = bool(self.params["adaptive"])
-        gamma     = float(self.params["gamma"])
+        adaptive = bool(self.params["adaptive"])
+        gamma = float(self.params["gamma"])
 
         h, w = mask.shape
 
@@ -149,12 +148,18 @@ class OpticalFlowWarp(Postprocessor):
             return mask
 
         # --- Step 1: dense forward optical flow (prev -> cur) ---------------
-        flow = self._dis.calc(self._prev_gray, cur_gray, None)
+        flow = self._dis.calc(
+            self._prev_gray,
+            cur_gray,
+            np.zeros((*cur_gray.shape, 2), dtype=np.float32),
+        )
         # flow shape: (H, W, 2), dtype float32
         # flow[y, x] = (dx, dy): pixel (x,y) in prev moved to (x+dx, y+dy) in cur.
 
         # --- Step 2: backward-warp approximation ----------------------------
         self._ensure_grids(h, w)
+        assert self._x_grid is not None
+        assert self._y_grid is not None
         # For cur pixel (x', y'), its source in prev is approximately (x'-dx, y'-dy).
         map_x = self._x_grid - flow[:, :, 0]
         map_y = self._y_grid - flow[:, :, 1]
@@ -170,9 +175,7 @@ class OpticalFlowWarp(Postprocessor):
         # --- Step 3: blend --------------------------------------------------
         if adaptive:
             # Mean Euclidean flow magnitude across the frame.
-            flow_mag = np.mean(
-                np.sqrt(flow[:, :, 0] ** 2 + flow[:, :, 1] ** 2)
-            )
+            flow_mag = np.mean(np.sqrt(flow[:, :, 0] ** 2 + flow[:, :, 1] ** 2))
             alpha = float(np.clip(alpha_min + gamma * flow_mag, alpha_min, 1.0))
         else:
             alpha = alpha_min

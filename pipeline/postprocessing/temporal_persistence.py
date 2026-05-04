@@ -22,6 +22,7 @@ Output is a binary float32 mask (0.0 / 1.0).
 This eliminates single-frame false positives (camera noise, model glitch) and
 prevents rapid disappearance of a partially occluded person.
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -33,9 +34,7 @@ from core.registry import postprocessors
 @postprocessors.register
 class TemporalPersistence(Postprocessor):
     name = "temporal_persistence"
-    description = (
-        "DeepSORT-style debouncer: confirms a pixel after N hits, keeps it for K misses."
-    )
+    description = "DeepSORT-style debouncer: confirms a pixel after N hits, keeps it for K misses."
     details = (
         "Reference: Wojke et al. (DeepSORT, ICIP 2017).\n"
         "State machine per pixel:\n"
@@ -99,27 +98,31 @@ class TemporalPersistence(Postprocessor):
         ]
 
     def reset(self) -> None:
-        self._state         = None
+        self._state = None
         self._confirm_count = None
-        self._age_count     = None
+        self._age_count = None
 
     def _init_state(self, mask: np.ndarray, threshold: float) -> None:
         """Cold start: initialise from first frame using the strict threshold."""
-        self._state         = (mask >= threshold)
+        self._state = mask >= threshold
         self._confirm_count = np.zeros(mask.shape, dtype=np.int32)
-        self._age_count     = np.zeros(mask.shape, dtype=np.int32)
+        self._age_count = np.zeros(mask.shape, dtype=np.int32)
 
     def __call__(self, mask: np.ndarray, original_frame: np.ndarray) -> np.ndarray:
         threshold = float(self.params["threshold"])
         n_confirm = int(self.params["n_confirm"])
-        max_age   = int(self.params["max_age"])
+        max_age = int(self.params["max_age"])
 
         if self._state is None or self._state.shape != mask.shape:
             self._init_state(mask, threshold)
+            assert self._state is not None
             return self._state.astype(np.float32)
 
-        positive = mask >= threshold   # bool (H, W)
+        positive = mask >= threshold  # bool (H, W)
         negative = ~positive
+
+        assert self._confirm_count is not None
+        assert self._age_count is not None
 
         # --- Update HIDDEN pixels -------------------------------------------
         # Increment confirm counter on positive detection, reset on miss.
@@ -150,6 +153,6 @@ class TemporalPersistence(Postprocessor):
 
         # Reset counters for pixels that just changed state.
         self._confirm_count = np.where(newly_visible, 0, self._confirm_count)
-        self._age_count     = np.where(newly_hidden,  0, self._age_count)
+        self._age_count = np.where(newly_hidden, 0, self._age_count)
 
         return self._state.astype(np.float32)

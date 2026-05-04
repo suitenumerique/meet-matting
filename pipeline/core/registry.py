@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import pkgutil
+from typing import Any
 
 
 class Registry:
@@ -9,9 +10,9 @@ class Registry:
 
     def __init__(self, label: str):
         self._label = label
-        self._store: dict[str, type] = {}
+        self._store: dict[str, type[Any]] = {}
 
-    def register(self, cls: type) -> type:
+    def register(self, cls: type[Any]) -> type[Any]:
         """Decorator that registers *cls* under ``cls.name``.
 
         Raises:
@@ -39,7 +40,7 @@ class Registry:
             if not module_name.startswith("_"):
                 importlib.import_module(f"{package_name}.{module_name}")
 
-    def get(self, name: str) -> type:
+    def get(self, name: str) -> type[Any]:
         """Return the class registered under *name*.
 
         Raises:

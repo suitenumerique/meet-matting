@@ -53,7 +53,7 @@ def process_video(
     total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    fourcc = cv2.VideoWriter_fourcc(*"avc1")
+    fourcc = cv2.VideoWriter_fourcc(*"avc1")  # type: ignore[attr-defined]
 
     mask_path = output_dir / "mask.mp4"
     raw_path = output_dir / "raw.mp4"

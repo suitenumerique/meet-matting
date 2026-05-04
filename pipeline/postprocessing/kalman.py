@@ -30,8 +30,8 @@ class KalmanMask(Postprocessor):
     def __init__(self, **params):
         super().__init__(**params)
         # State estimates -- all (H, W) float32.
-        self._p: np.ndarray | None = None    # probability estimate
-        self._v: np.ndarray | None = None    # velocity estimate
+        self._p: np.ndarray | None = None  # probability estimate
+        self._v: np.ndarray | None = None  # velocity estimate
         # Upper-triangular of the 2x2 symmetric covariance matrix P.
         self._P00: np.ndarray | None = None
         self._P01: np.ndarray | None = None
@@ -49,7 +49,7 @@ class KalmanMask(Postprocessor):
                 max_value=0.5,
                 step=0.001,
                 help="How much the probability can drift between frames beyond velocity. "
-                     "Higher = less prediction confidence = faster adaptation.",
+                "Higher = less prediction confidence = faster adaptation.",
             ),
             ParameterSpec(
                 name="q_vel",
@@ -60,7 +60,7 @@ class KalmanMask(Postprocessor):
                 max_value=0.1,
                 step=0.0001,
                 help="How much velocity can change between frames. "
-                     "Keep small for slowly-varying masks.",
+                "Keep small for slowly-varying masks.",
             ),
             ParameterSpec(
                 name="r_mes",
@@ -87,13 +87,18 @@ class KalmanMask(Postprocessor):
         r_mes = self.params["r_mes"]
 
         if self._p is None or self._p.shape != mask.shape:
-            self._p   = mask.copy()
-            self._v   = np.zeros_like(mask)
+            self._p = mask.copy()
+            self._v = np.zeros_like(mask)
             # Start with high uncertainty so the filter converges from the first measurement.
             self._P00 = np.ones_like(mask)
             self._P01 = np.zeros_like(mask)
             self._P11 = np.ones_like(mask)
             return mask
+
+        assert self._v is not None
+        assert self._P00 is not None
+        assert self._P01 is not None
+        assert self._P11 is not None
 
         # ── PREDICT ───────────────────────────────────────────────────────────
         # State transition: F = [[1, 1], [0, 1]] (dt = 1 frame).
@@ -112,8 +117,8 @@ class KalmanMask(Postprocessor):
         S = P00_p + r_mes
 
         # Kalman gain: K = P_pred * H^T / S = [P00_p, P01_p]^T / S.
-        K0 = P00_p / S   # gain for position
-        K1 = P01_p / S   # gain for velocity
+        K0 = P00_p / S  # gain for position
+        K1 = P01_p / S  # gain for velocity
 
         # Innovation.
         y = mask - p_pred
@@ -128,8 +133,8 @@ class KalmanMask(Postprocessor):
         P01_new = one_minus_K0 * P01_p
         P11_new = P11_p - K1 * P01_p
 
-        self._p   = p_new
-        self._v   = v_new
+        self._p = p_new
+        self._v = v_new
         self._P00 = P00_new
         self._P01 = P01_new
         self._P11 = P11_new
