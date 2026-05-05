@@ -28,18 +28,22 @@ class MobileNetV3LRASPPWrapper(BaseModelWrapper):
     PERSON_CLASS_INDEX = 15  # Index de la classe "person" dans COCO/VOC
 
     def __init__(self):
+        """Initialise with no model loaded yet."""
         self._model = None
         self._device = None
 
     @property
     def name(self) -> str:
+        """Return the model name."""
         return "MobileNetV3 + LRASPP"
 
     @property
     def input_size(self) -> tuple[int, int] | None:
+        """Return the fixed 256×256 input size."""
         return (256, 256)
 
     def load(self) -> None:
+        """Download weights if needed and initialise the inference session."""
         try:
             import torch
             import torchvision.models.segmentation as seg_models
@@ -66,9 +70,18 @@ class MobileNetV3LRASPPWrapper(BaseModelWrapper):
         logger.info("MobileNetV3+LRASPP: modèle chargé sur %s.", self._device)
 
     def predict(self, frame_bgr: np.ndarray) -> np.ndarray:
+        """Run inference on a single BGR frame; delegates to predict_batch."""
         return self.predict_batch([frame_bgr])[0]
 
     def predict_batch(self, frames_bgr: list[np.ndarray]) -> list[np.ndarray]:
+        """Run inference on a batch of BGR frames and return float32 masks.
+
+        Args:
+            frames_bgr: List of BGR images (H, W, 3), dtype uint8.
+
+        Returns:
+            List of alpha mattes (H, W), dtype float32, values in [0, 1].
+        """
         if self._model is None:
             raise RuntimeError("MobileNetV3+LRASPP: modèle non chargé.")
 
@@ -114,26 +127,13 @@ class MobileNetV3LRASPPWrapper(BaseModelWrapper):
         return masks
 
     def get_flops(self, input_shape: tuple[int, int, int] = (3, 256, 256)) -> float:
-        try:
-            import torch
-            from fvcore.nn import FlopCountAnalysis
-
-            # Silence internal fvcore warnings about unsupported operators
-            logging.getLogger("fvcore.nn.jit_analysis").setLevel(logging.ERROR)
-
-            dummy = torch.randn(1, *input_shape).to(self._device)
-            flops = FlopCountAnalysis(self._model, dummy).unsupported_ops_warnings(False)
-            return float(flops.total())
-        except ImportError:
-            logger.warning("fvcore non disponible, retour aux estimations.")
-            # ~70 MFLOPs pour MobileNetV3-Large + LRASPP à 256x256
-            c, h, w = input_shape
-            return 70e6 * (h * w) / (256 * 256)
-        except Exception as e:
-            logger.warning("Erreur FLOPs MobileNetV3: %s", e)
-            return -1.0
+        """Return estimated FLOPs (~70 MFLOPs at 256×256)."""
+        # ~70 MFLOPs for MobileNetV3-Large + LRASPP at 256×256 (from torchvision model card)
+        _, h, w = input_shape
+        return 70e6 * (h * w) / (256 * 256)
 
     def cleanup(self) -> None:
+        """Delete the model and free GPU memory."""
         if self._model is not None:
             del self._model
             self._model = None

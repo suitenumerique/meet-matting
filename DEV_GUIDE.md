@@ -12,7 +12,7 @@ Two-phase project for real-time video matting:
 ## Project structure
 
 ```
-background-segmentation/
+meet-matting/
 ├── benchmark/            # Phase 1: model evaluation suite
 │   ├── models/           # 10 model wrappers (MediaPipe, RVM, ModNet, ...)
 │   ├── metrics.py        # IoU, BF-measure, FWE, P95 latency, FLOPs
@@ -147,7 +147,7 @@ uv run ruff format --check benchmark/    # CI-style: fail if not formatted
 
 ## Type-check — mypy
 
-Config in `[tool.mypy]`. Missing stubs are ignored (`cv2`, `mediapipe`, `fvcore`...).
+Config in `[tool.mypy]`. Missing stubs are ignored (`cv2`, `mediapipe`...).
 
 ```bash
 uv run mypy benchmark/
@@ -176,14 +176,6 @@ The mypy hook is a `local` / `language: system` hook that calls `uv run mypy ben
 - It always checks the whole `benchmark/` package (`pass_filenames: false`), not just the staged files. Avoids cross-file inference differences between a partial and a full check.
 
 Trade-off: `uv` must be on `PATH` for anyone running pre-commit. If you don't have `uv` installed, follow [the uv install guide](https://docs.astral.sh/uv/getting-started/installation/) before `pre-commit install`.
-
-### Why `ruff check` passes locally but the hook fails
-
-`ruff check` is the **linter**; `ruff format` is the **formatter** — separate tools. The hook runs both. To match it locally:
-
-```bash
-uv run ruff format --check benchmark/
-```
 
 ## Git workflow
 

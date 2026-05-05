@@ -39,6 +39,7 @@ class RVMWrapper(BaseModelWrapper):
     """
 
     def __init__(self, model_path: str | None = None, downsample_ratio: float = 0.25):
+        """Initialise with an optional ONNX path and internal-processing downsample ratio."""
         self._model_path = Path(model_path) if model_path else _DEFAULT_MODEL_PATH
         self._downsample_ratio = downsample_ratio
         self._session: Any = None
@@ -46,13 +47,16 @@ class RVMWrapper(BaseModelWrapper):
 
     @property
     def name(self) -> str:
+        """Return the model name."""
         return "RVM (MobileNetV3)"
 
     @property
     def input_size(self) -> tuple[int, int] | None:
+        """Return None — input size is dynamic."""
         return None  # Dynamique, dépend de la vidéo
 
     def load(self) -> None:
+        """Download weights if needed and initialise the inference session."""
         try:
             import onnxruntime as ort
         except ImportError as e:
@@ -110,6 +114,14 @@ class RVMWrapper(BaseModelWrapper):
         }
 
     def predict(self, frame_bgr: np.ndarray) -> np.ndarray:
+        """Run inference on a single BGR frame and update the GRU recurrent state.
+
+        Args:
+            frame_bgr: BGR image (H, W, 3), dtype uint8.
+
+        Returns:
+            Alpha matte (H, W), dtype float32, values in [0, 1].
+        """
         if self._session is None:
             raise RuntimeError("RVM: modèle non chargé. Appelle load() d'abord.")
 
@@ -152,6 +164,7 @@ class RVMWrapper(BaseModelWrapper):
         return mask.astype(np.float32)
 
     def get_flops(self, input_shape: tuple[int, int, int] = (3, 256, 256)) -> float:
+        """Return estimated FLOPs (~600 MFLOPs at 256×256)."""
         # RVM MobileNetV3 : ~600 MFLOPs à 256x256
         c, h, w = input_shape
         base_flops = 600e6  # pour 256x256
@@ -159,6 +172,7 @@ class RVMWrapper(BaseModelWrapper):
         return base_flops * scale
 
     def cleanup(self) -> None:
+        """Release the ONNX session and clear the recurrent state."""
         self._session = None
         self._recurrent_state = {}
         logger.info("RVM: session ONNX fermée.")

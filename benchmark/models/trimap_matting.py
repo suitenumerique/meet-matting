@@ -1,3 +1,5 @@
+"""Trimap Matting V3 (Limb-Lock) — GrabCut-based fallback segmenter with pose-guided foreground locking."""
+
 import logging
 
 import cv2
@@ -25,6 +27,7 @@ class TrimapMattingWrapper(BaseModelWrapper):
         refine_eps: float = 0.05,  # Plus stable et rapide
         ema_alpha: float = 0.7,
     ):
+        """Initialise working resolution, morphology sizes, and sub-models."""
         self._work_size = work_size
         self._erosion_size = erosion_size
         self._dilation_size = dilation_size
@@ -39,13 +42,16 @@ class TrimapMattingWrapper(BaseModelWrapper):
 
     @property
     def name(self) -> str:
+        """Return the model name."""
         return "Trimap Matting V3 (Limb-Lock) - 240p"
 
     @property
     def input_size(self) -> tuple[int, int] | None:
+        """Return None — input size is dynamic."""
         return None
 
     def load(self) -> None:
+        """Download weights if needed and initialise the inference session."""
         self._semantic_model.load()
         assert self._pose_model is not None  # garanti par __init__
         try:
@@ -55,6 +61,14 @@ class TrimapMattingWrapper(BaseModelWrapper):
             self._pose_model = None
 
     def predict(self, frame_bgr: np.ndarray) -> np.ndarray:
+        """Run trimap-based matting on a single BGR frame.
+
+        Args:
+            frame_bgr: BGR image (H, W, 3), dtype uint8.
+
+        Returns:
+            Alpha matte (H, W), dtype float32, values in [0, 1].
+        """
         h_orig, w_orig = frame_bgr.shape[:2]
 
         # ── Étape 1 : Préparation Low-Res & RGB (Vitesse) ──
@@ -153,9 +167,11 @@ class TrimapMattingWrapper(BaseModelWrapper):
         return mask_final
 
     def get_flops(self, input_shape: tuple[int, int, int] = (3, 256, 256)) -> float:
+        """Return estimated FLOPs (~22 MFLOPs at 240p)."""
         return 22.0e6  # Optimisé par rapport à la V2
 
     def cleanup(self) -> None:
+        """Release sub-model resources."""
         self._semantic_model.cleanup()
         if self._pose_model:
             self._pose_model.cleanup()

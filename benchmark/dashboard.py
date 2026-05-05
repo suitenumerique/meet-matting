@@ -552,7 +552,10 @@ with tab1:
             _analyze = analyze_thresholds
 
             def _bg_benchmark():
+                """Background thread: runs the full benchmark and pushes results to bg_queue."""
+
                 def _on_result(entry: dict):
+                    """Push a single benchmark result dict to the shared queue."""
                     bg_queue.put(("result", entry))
 
                 t_start = time.time()
@@ -655,10 +658,14 @@ with tab2:
             _threshold = threshold
 
             def _bg_worker():
+                """Background thread: runs post-hoc metrics computation and pushes events to bg_queue."""
+
                 def _on_result(entry: dict):
+                    """Push a single metrics result dict to the shared queue."""
                     bg_queue.put(("result", entry))
 
                 def _on_lat_status(msg: str):
+                    """Push a latency-measurement status string to the shared queue."""
                     bg_queue.put(("status", msg))
 
                 try:

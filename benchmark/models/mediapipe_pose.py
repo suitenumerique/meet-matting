@@ -35,13 +35,16 @@ class MediapipePoseWrapper(BaseModelWrapper):
     """Extraction rapide des membres pour le Limb-Lock."""
 
     def __init__(self):
+        """Initialise with no landmarker loaded yet."""
         self._landmarker = None
 
     @property
     def name(self) -> str:
+        """Return the model name."""
         return "MediaPipe Pose Lite"
 
     def load(self) -> None:
+        """Download weights if needed and initialise the inference session."""
         import mediapipe as mp
         from mediapipe.tasks.python import BaseOptions
         from mediapipe.tasks.python.vision import PoseLandmarker, PoseLandmarkerOptions
@@ -83,12 +86,15 @@ class MediapipePoseWrapper(BaseModelWrapper):
         return mask
 
     def predict(self, frame_bgr: np.ndarray) -> np.ndarray:
+        """Return a float32 [0,1] limb mask for *frame_bgr*."""
         return self.get_limb_mask(frame_bgr).astype(np.float32) / 255.0
 
     def get_flops(self, input_shape: tuple[int, int, int] = (3, 256, 256)) -> float:
+        """Return estimated FLOPs (~5 MFLOPs, pose landmarker lite)."""
         return 5.0e6  # Estimation pose landmarker lite
 
     def cleanup(self) -> None:
+        """Release the landmarker session."""
         if self._landmarker:
             self._landmarker.close()
         self._landmarker = None

@@ -1,3 +1,5 @@
+"""Benchmark package — suppresses noisy Streamlit and TFLite warnings at import time."""
+
 import logging
 import warnings
 
@@ -13,5 +15,3 @@ for logger_name in [
     logger.disabled = True
 
 warnings.filterwarnings("ignore", message="missing ScriptRunContext")
-
-__version__ = "1.0.0"

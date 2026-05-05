@@ -44,6 +44,7 @@ def setup_logging(level: str = LOG_LEVEL) -> None:
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse and return CLI arguments."""
     parser = argparse.ArgumentParser(
         description="🎬 Benchmark de modèles de Video Matting",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -128,6 +129,7 @@ Modèles disponibles :
 
 
 def main() -> None:
+    """Entry point: parse arguments, run the benchmark, and print the summary table."""
     args = parse_args()
     setup_logging(args.log_level)
     logger = logging.getLogger(__name__)

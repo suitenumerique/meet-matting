@@ -35,6 +35,7 @@ class MODNetWrapper(BaseModelWrapper):
     """
 
     def __init__(self, model_path: str | None = None):
+        """Initialise with an optional custom ONNX model path."""
         self._model_path = Path(model_path) if model_path else _DEFAULT_MODEL_PATH
         self._session: Any = None
         self._input_name: str | None = None
@@ -42,13 +43,16 @@ class MODNetWrapper(BaseModelWrapper):
 
     @property
     def name(self) -> str:
+        """Return the model name."""
         return "MODNet"
 
     @property
     def input_size(self) -> tuple[int, int] | None:
+        """Return the fixed 512×512 input size."""
         return (self._ref_size, self._ref_size)
 
     def load(self) -> None:
+        """Download weights if needed and initialise the inference session."""
         try:
             import onnxruntime as ort
         except ImportError as e:
@@ -94,6 +98,7 @@ class MODNetWrapper(BaseModelWrapper):
         logger.info("MODNet: modèle ONNX chargé (%s).", self._model_path.name)
 
     def _download_model(self) -> None:
+        """Fetch the MODNet ONNX weights from HuggingFace."""
         import urllib.request
 
         self._model_path.parent.mkdir(parents=True, exist_ok=True)
@@ -102,9 +107,18 @@ class MODNetWrapper(BaseModelWrapper):
         logger.info("MODNet: téléchargement terminé.")
 
     def predict(self, frame_bgr: np.ndarray) -> np.ndarray:
+        """Run inference on a single BGR frame; delegates to predict_batch."""
         return self.predict_batch([frame_bgr])[0]
 
     def predict_batch(self, frames_bgr: list[np.ndarray]) -> list[np.ndarray]:
+        """Run inference on a batch of BGR frames and return float32 alpha mattes.
+
+        Args:
+            frames_bgr: List of BGR images (H, W, 3), dtype uint8.
+
+        Returns:
+            List of alpha mattes (H, W), dtype float32, values in [0, 1].
+        """
         if self._session is None:
             raise RuntimeError("MODNet: modèle non chargé. Appelle load() d'abord.")
 
@@ -159,6 +173,7 @@ class MODNetWrapper(BaseModelWrapper):
         return masks
 
     def get_flops(self, input_shape: tuple[int, int, int] = (3, 256, 256)) -> float:
+        """Return estimated FLOPs scaled from ~4 GFLOPs at 512×512."""
         # MODNet : ~4 GFLOPs à 512x512
         c, h, w = input_shape
         base_flops = 4e9
@@ -166,5 +181,6 @@ class MODNetWrapper(BaseModelWrapper):
         return base_flops * scale
 
     def cleanup(self) -> None:
+        """Release the ONNX inference session."""
         self._session = None
         logger.info("MODNet: session ONNX fermée.")
