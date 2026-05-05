@@ -6,7 +6,7 @@ requires-python = ">=3.11"
 dependencies = [
     # Core
     "numpy>=1.24.0",
-    "opencv-python>=4.8.0",
+    "opencv-contrib-python>=4.8.0",
     "tqdm>=4.65.0",
     # Deep Learning
     "torch>=2.0.0",
@@ -15,8 +15,6 @@ dependencies = [
     "onnxruntime>=1.16.0",
     # MediaPipe
     "mediapipe>=0.10.0",
-    # FLOPs
-    "fvcore>=0.1.5",
     # Video I/O
     "imageio>=2.30.0",
     "imageio-ffmpeg>=0.4.0",
@@ -56,7 +54,10 @@ indent-style = "space"
 
 [tool.mypy]
 python_version = "3.11"
-ignore_missing_imports = true   # cv2, mediapipe, fvcore... no stubs
+ignore_missing_imports = true   # cv2, mediapipe... no stubs
 check_untyped_defs = false      # don't enforce on un-annotated bodies
 warn_unused_ignores = true
 warn_redundant_casts = true
+
+[tool.pytest.ini_options]
+testpaths = ["pipeline/tests"]

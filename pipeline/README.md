@@ -9,10 +9,10 @@ The pipeline lets you chain any combination of **preprocessors → matting model
 ## Quickstart
 
 ```bash
-cd meet-matting/pipeline
-pip install -r requirements.txt          # or: uv pip install -r requirements.txt
-# Drop a video into data/videos/
-streamlit run app.py
+# From the repo root:
+uv sync
+# Drop a video into pipeline/data/videos/
+uv run streamlit run pipeline/app.py
 ```
 
 The sidebar will show the available models, preprocessors, and postprocessors automatically.
@@ -24,8 +24,11 @@ See the per-folder READMEs for worked examples and the exact method signatures:
 - **Preprocessor** → [`preprocessing/README.md`](preprocessing/README.md)
 - **Model** → [`models/README.md`](models/README.md)
 - **Postprocessor** → [`postprocessing/README.md`](postprocessing/README.md)
+- **Upsampling method** → [`upsampling/`](upsampling/) (same pattern as postprocessors, base class `UpsamplingMethod`)
+- **Compositing technique** → [`compositing/`](compositing/) (base class `CompositingMethod`)
+- **Frame-skip strategy** → [`skip_strategies/`](skip_strategies/) (base class `SkipStrategy`)
 
-Key rule: the filename must **not** start with `_`, and the class must be decorated with the appropriate registry decorator (`@preprocessors.register`, `@models.register`, `@postprocessors.register`).
+Key rule: the filename must **not** start with `_`, and the class must be decorated with the appropriate registry decorator.
 
 ## Data contracts
 

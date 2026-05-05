@@ -1,3 +1,5 @@
+"""Joint bilateral upsampler — edge-aware upsampling guided by the high-resolution frame (Kopf et al. 2007)."""
+
 import cv2
 import numpy as np
 from core.base import UpsamplingMethod
@@ -12,6 +14,7 @@ class JointBilateral(UpsamplingMethod):
 
     @classmethod
     def parameter_specs(cls):
+        """Return the list of tunable parameters for this component."""
         return [
             ParameterSpec(
                 name="radius",

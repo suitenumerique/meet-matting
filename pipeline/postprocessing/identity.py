@@ -1,3 +1,5 @@
+"""Identity postprocessor — passes the mask through unchanged (no-op baseline)."""
+
 from core.base import Postprocessor
 from core.registry import postprocessors
 
@@ -9,6 +11,7 @@ class Identity(Postprocessor):
 
     @classmethod
     def parameter_specs(cls):
+        """Return the list of tunable parameters for this component."""
         return []
 
     def __call__(self, mask, original_frame):

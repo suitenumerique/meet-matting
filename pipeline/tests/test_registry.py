@@ -1,8 +1,11 @@
+"""Unit tests for the Registry class — registration, discovery, and error cases."""
+
 import pytest
 from core.registry import Registry
 
 
 def test_register_and_get():
+    """A class decorated with @reg.register must be retrievable via reg.get(name)."""
     reg = Registry("test")
 
     @reg.register
@@ -13,6 +16,7 @@ def test_register_and_get():
 
 
 def test_discover_imports_non_underscore_modules():
+    """discover() must import every non-underscore module and populate the registry."""
     # Use the real preprocessors registry after discovery.
     from core.registry import preprocessors
 
@@ -22,6 +26,7 @@ def test_discover_imports_non_underscore_modules():
 
 
 def test_name_collision_raises():
+    """Registering two classes with the same name must raise ValueError."""
     reg = Registry("test")
 
     @reg.register
@@ -36,6 +41,7 @@ def test_name_collision_raises():
 
 
 def test_get_unknown_raises_with_list():
+    """get() for an unknown name must raise KeyError listing available names in the message."""
     reg = Registry("test")
 
     @reg.register

@@ -53,7 +53,7 @@ def process_video(
     total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    fourcc = cv2.VideoWriter_fourcc(*"avc1")
+    fourcc = cv2.VideoWriter_fourcc(*"avc1")  # type: ignore[attr-defined]
 
     mask_path = output_dir / "mask.mp4"
     raw_path = output_dir / "raw.mp4"
@@ -68,6 +68,7 @@ def process_video(
     idx = 0
     last_result: dict | None = None
     last_raw_bgr: np.ndarray | None = None
+    prev_frame_rgb: np.ndarray | None = None
     fps_val = orig_fps
 
     try:
@@ -89,12 +90,14 @@ def process_video(
                     (frame_rgb * raw_alpha).astype(np.uint8), cv2.COLOR_RGB2BGR
                 )
             else:
-                # Reuse last mask, re-composite onto the current source frame.
-                mask = last_result["final_mask"]
-                mask3 = mask[..., None]
-                final = (
-                    (frame_rgb * mask3 + pipeline._bg * (1.0 - mask3)).clip(0, 255).astype(np.uint8)
-                )
+                # Warp previous mask to current frame via skip strategy (ou simple réutilisation).
+                prev_mask = last_result["final_mask"]
+                if skip_strategy is not None and prev_frame_rgb is not None:
+                    mask = skip_strategy(frame_rgb, prev_frame_rgb, prev_mask)
+                else:
+                    mask = prev_mask
+
+                final = pipeline.composite(frame_rgb, mask)
                 last_result = {
                     "final_mask": mask,
                     "final": final,
@@ -106,6 +109,8 @@ def process_video(
                     last_raw_bgr = cv2.cvtColor(
                         (frame_rgb * raw_alpha).astype(np.uint8), cv2.COLOR_RGB2BGR
                     )
+
+            prev_frame_rgb = frame_rgb
 
             mask_uint8 = (last_result["final_mask"] * 255).astype(np.uint8)
             mask_writer.write(cv2.cvtColor(mask_uint8, cv2.COLOR_GRAY2BGR))

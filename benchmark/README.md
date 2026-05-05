@@ -11,14 +11,13 @@ python -m benchmark.run_benchmark --help       # CLI
 
 ## Models
 
-Ten model wrappers, all sharing the [`BaseModelWrapper`](models/base.py) interface (`load`, `predict`, `reset_state`, `cleanup`).
+Nine model wrappers, all sharing the [`BaseModelWrapper`](models/base.py) interface (`load`, `predict`, `reset_state`, `cleanup`).
 
 | Key | Model | Backend | Input size | Notes |
 |---|---|---|---|---|
 | `mediapipe_portrait` | MediaPipe Selfie Segmenter | TFLite | 256×256 | Portrait orientation |
 | `mediapipe_landscape` | MediaPipe Selfie Landscape | TFLite | 256×256 | Landscape orientation |
 | `mediapipe_selfie_multiclass` | MediaPipe Multiclass | TFLite | 256×256 | 5 classes (person, hair, skin…) |
-| `mediapipe_pose` | MediaPipe Pose Segmentation | TFLite | Dynamic | Pose-driven mask |
 | `rvm` | Robust Video Matting | ONNX | Dynamic | **Recurrent** (GRU state) — best temporal coherence |
 | `mobilenetv3_lraspp` | MobileNetV3 LR-ASPP | PyTorch | Dynamic | Lightweight pyramid decoder |
 | `modnet` | MODNet | ONNX | 512×512 | High-quality portrait alpha matting |
@@ -104,7 +103,7 @@ Reported alongside `latency_mean_ms` and `latency_std_ms` for diagnostics.
 
 **What it measures.** Theoretical compute cost — floating-point operations per inferred frame. Hardware-independent complexity indicator, useful when comparing latency across machines.
 
-**How it's computed.** Measured once per model with `fvcore` (PyTorch) or `onnx-tool` (ONNX), at the model's effective input resolution. Returned in GFLOPs.
+**How it's computed.** Hardcoded estimates from published papers and official model cards, at each model's effective input resolution. Returned in GFLOPs.
 
 **Interpretation.** Lower is better, but FLOPs do not directly equal latency: memory bandwidth, kernel launch overhead, and operator support on the target hardware (CoreML, CUDA, CPU) all matter. Use FLOPs to explain **why** a model is slow, not to predict **how** slow.
 
@@ -132,16 +131,16 @@ This makes Mat-Anything v2 effectively the **upper bound** for the benchmark —
 
 ```
 benchmark/dataset/
-├── videos/                  # 25 source clips (.mp4 / .mov)
-│   ├── kaggle_001.mp4
-│   ├── ...
-│   └── custom_outdoor_03.mp4
-└── ground_truth/
-    ├── kaggle_001/          # one PNG per frame, zero-padded indexing
-    │   ├── 0001.png
-    │   └── ...
-    └── custom_outdoor_03/
-        └── ...
+├── videos/          # 25 source clips, zero-padded numbering
+│   ├── 0000.mp4
+│   ├── 0001.mp4
+│   └── ...
+└── ground_truth/    # one mask video per source clip, same numbering
+    ├── 0000.mp4
+    ├── 0001.mp4
+    └── ...
 ```
 
-Ground truth can also be supplied as a single `.mp4` file (one mask per frame) or as a green-screen video (chroma key auto-detected and inverted by the runner).
+Each ground-truth file is a single-channel `.mp4` where each frame is the binary mask for the corresponding source frame. The runner pairs files by name (`0000 ↔ 0000`, etc.).
+
+The runner also supports per-clip folders of PNG masks (one file per frame, zero-padded) and green-screen videos (chroma key auto-detected and inverted).

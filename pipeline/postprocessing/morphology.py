@@ -1,3 +1,5 @@
+"""Morphology postprocessor — closing + opening to fill holes and remove isolated noise blobs."""
+
 import cv2
 import numpy as np
 from core.base import Postprocessor
@@ -7,23 +9,21 @@ from core.registry import postprocessors
 # Map readable names to cv2 morphological shape constants.
 _SHAPE_MAP: dict[str, int] = {
     "ELLIPSE": cv2.MORPH_ELLIPSE,
-    "RECT":    cv2.MORPH_RECT,
-    "CROSS":   cv2.MORPH_CROSS,
+    "RECT": cv2.MORPH_RECT,
+    "CROSS": cv2.MORPH_CROSS,
 }
 
 
 def _make_kernel(size: int, shape: str) -> np.ndarray:
     """Return a structuring element of the given odd *size* and *shape*."""
-    size = max(1, size | 1)   # force odd value; minimum 1
+    size = max(1, size | 1)  # force odd value; minimum 1
     return cv2.getStructuringElement(_SHAPE_MAP[shape], (size, size))
 
 
 @postprocessors.register
 class MorphologyCleanup(Postprocessor):
     name = "morphology"
-    description = (
-        "Closes internal holes then removes peripheral noise (configurable kernel sizes)."
-    )
+    description = "Closes internal holes then removes peripheral noise (configurable kernel sizes)."
     details = (
         "Reference: van Herk (1992) / Gil & Werman (1993).\n"
         "Closing (dilation then erosion): fills small gaps inside the mask.\n"
@@ -34,6 +34,7 @@ class MorphologyCleanup(Postprocessor):
 
     @classmethod
     def parameter_specs(cls) -> list[ParameterSpec]:
+        """Return the list of tunable parameters for this component."""
         return [
             ParameterSpec(
                 name="close_size",
@@ -84,14 +85,24 @@ class MorphologyCleanup(Postprocessor):
         ]
 
     def reset(self) -> None:
+        """No temporal state to clear."""
         pass
 
     def __call__(self, mask: np.ndarray, original_frame: np.ndarray) -> np.ndarray:
+        """Apply closing then opening (or the reverse) to *mask*.
+
+        Args:
+            mask:           Alpha matte, shape (H, W), dtype float32, range [0, 1].
+            original_frame: Original RGB frame, shape (H, W, 3), dtype uint8 (unused).
+
+        Returns:
+            Morphologically cleaned mask, shape (H, W), dtype float32, range [0, 1].
+        """
         close_size = int(self.params["close_size"])
-        open_size  = int(self.params["open_size"])
-        shape      = self.params["kernel_shape"]
-        iters      = int(self.params["iterations"])
-        order      = self.params["order"]
+        open_size = int(self.params["open_size"])
+        shape = self.params["kernel_shape"]
+        iters = int(self.params["iterations"])
+        order = self.params["order"]
 
         if close_size == 0 and open_size == 0:
             return mask
@@ -100,10 +111,12 @@ class MorphologyCleanup(Postprocessor):
         m_u8 = (mask * 255.0).astype(np.uint8)
 
         def close_op(img: np.ndarray) -> np.ndarray:
+            """Apply morphological closing (dilation then erosion) to fill internal holes."""
             k = _make_kernel(close_size, shape)
             return cv2.morphologyEx(img, cv2.MORPH_CLOSE, k, iterations=iters)
 
         def open_op(img: np.ndarray) -> np.ndarray:
+            """Apply morphological opening (erosion then dilation) to remove peripheral noise."""
             k = _make_kernel(open_size, shape)
             return cv2.morphologyEx(img, cv2.MORPH_OPEN, k, iterations=iters)
 

@@ -16,11 +16,15 @@ _POSE_MODEL_URL = "https://storage.googleapis.com/mediapipe-models/pose_landmark
 
 
 class PersonDetector:
+    """EfficientDet-Lite0 object detector restricted to the 'person' class."""
+
     def __init__(self, score_threshold: float = 0.25):
+        """Initialise with a minimum detection confidence threshold."""
         self._detector = None
         self._score_threshold = score_threshold
 
     def load(self):
+        """Download weights if needed and initialise the MediaPipe object detector."""
         try:
             import mediapipe as mp
             from mediapipe.tasks.python import BaseOptions
@@ -57,6 +61,7 @@ class PersonDetector:
         """Detect persons and return bboxes (x1, y1, x2, y2)."""
         if self._detector is None:
             self.load()
+        assert self._detector is not None
 
         h, w = frame_rgb.shape[:2]
         mp_image = self._mp.Image(image_format=self._mp.ImageFormat.SRGB, data=frame_rgb)
@@ -84,10 +89,12 @@ class PoseDetector:
     """Uses MediaPipe Pose to find person bounding boxes based on keypoints."""
 
     def __init__(self, min_pose_presence_confidence: float = 0.5):
+        """Initialise with a minimum pose-presence confidence threshold."""
         self._landmarker = None
         self._conf = min_pose_presence_confidence
 
     def load(self):
+        """Download weights if needed and initialise the MediaPipe pose landmarker."""
         try:
             import mediapipe as mp
             from mediapipe.tasks.python import BaseOptions
@@ -124,6 +131,7 @@ class PoseDetector:
         """Detect persons using keypoints and return bboxes (x1, y1, x2, y2)."""
         if self._landmarker is None:
             self.load()
+        assert self._landmarker is not None
 
         h, w = frame_rgb.shape[:2]
         mp_image = self._mp.Image(image_format=self._mp.ImageFormat.SRGB, data=frame_rgb)
@@ -161,32 +169,33 @@ class PoseDetector:
 
 class YoloDetector:
     """Uses Ultralytics YOLO11 for high-performance person detection."""
-    
+
     # Class-level cache to avoid reloading the model
-    _MODEL_CACHE = {}
+    _MODEL_CACHE: dict[tuple[str, float], tuple[object, str]] = {}
 
     def __init__(self, model_size: str = "n", score_threshold: float = 0.25):
+        """Initialise with a YOLO model size variant and detection confidence threshold."""
         self._model = None
         self._size = model_size
         self._conf = score_threshold
         self._device = "cpu"
 
     def load(self):
+        """Download weights if needed and initialise the YOLO model (CPU only for stability)."""
         cache_key = (self._size, self._conf)
         if cache_key in self._MODEL_CACHE:
             self._model, self._device = self._MODEL_CACHE[cache_key]
             return
 
         try:
-            import torch
             from ultralytics import YOLO
-            
+
             # CRITICAL FIX: DO NOT use MPS for YOLO on Mac.
-            # PyTorch's NMS (Non-Maximum Suppression) operation on MPS 
+            # PyTorch's NMS (Non-Maximum Suppression) operation on MPS
             # currently causes massive hangs (> 8 seconds) and freezes the app.
             # We strictly force CPU, which is actually very fast for YOLO Nano.
             self._device = "cpu"
-                
+
             logger.info(f"YOLO11 loading on device: {self._device} (MPS disabled for stability)")
         except ImportError as e:
             raise ImportError(
@@ -201,7 +210,7 @@ class YoloDetector:
         model = YOLO(str(model_path))
         model.to(self._device)
         # Note: Keeping half=False for stability against 'gray screen' issues
-            
+
         self._model = model
         self._MODEL_CACHE[cache_key] = (self._model, self._device)
 
@@ -211,6 +220,7 @@ class YoloDetector:
         """Detect persons using YOLO and return bboxes (x1, y1, x2, y2)."""
         if self._model is None:
             self.load()
+        assert self._model is not None
 
         h, w = frame_rgb.shape[:2]
 
@@ -222,8 +232,8 @@ class YoloDetector:
             classes=[0],  # 0 is 'person' in COCO
             verbose=False,
             device=self._device,
-            imgsz=320, 
-            half=False, 
+            imgsz=320,
+            half=False,
         )
 
         bboxes = []
@@ -245,7 +255,7 @@ class YoloDetector:
 
                     if fx2 > fx1 and fy2 > fy1:
                         bboxes.append((fx1, fy1, fx2, fy2))
-        
+
         if not bboxes:
             logger.debug(f"YOLO: No person detected (device={self._device})")
         else:
@@ -258,10 +268,12 @@ class FaceDetector:
     """Uses MediaPipe Face Detector (BlazeFace) to find faces."""
 
     def __init__(self, min_detection_confidence: float = 0.5):
+        """Initialise with a minimum face-detection confidence threshold."""
         self._detector = None
         self._conf = min_detection_confidence
 
     def load(self):
+        """Download weights if needed and initialise the MediaPipe face detector."""
         try:
             import mediapipe as mp
             from mediapipe.tasks.python import BaseOptions
@@ -292,6 +304,7 @@ class FaceDetector:
         """Detect faces and return bboxes (x1, y1, x2, y2)."""
         if self._detector is None:
             self.load()
+        assert self._detector is not None
 
         h, w = frame_rgb.shape[:2]
         mp_image = self._mp.Image(image_format=self._mp.ImageFormat.SRGB, data=frame_rgb)

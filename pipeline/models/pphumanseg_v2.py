@@ -1,3 +1,5 @@
+"""PP-HumanSeg V2 pipeline model wrapper — lightweight ONNX-based human segmenter at 192×192."""
+
 import logging
 import urllib.request
 from pathlib import Path
@@ -6,7 +8,6 @@ from typing import Any
 import cv2
 import numpy as np
 from core.base import MattingModel
-from core.parameters import ParameterSpec
 from core.registry import models
 
 logger = logging.getLogger(__name__)
@@ -32,9 +33,11 @@ class PPHumanSegV2(MattingModel):
 
     @classmethod
     def parameter_specs(cls):
+        """Return the list of tunable parameters for this component."""
         return []
 
     def load(self, weights_path=None):
+        """Download weights if needed and initialise the inference session."""
         try:
             import onnxruntime as ort
         except ImportError as e:
@@ -71,7 +74,7 @@ class PPHumanSegV2(MattingModel):
 
     def infer(self, frame: np.ndarray) -> np.ndarray:
         """Run inference on a single frame.
-        
+
         This model expects 192x192 float32 input with normalization (mean=0.5, std=0.5).
         It handles its own resizing and upsampling to be self-contained.
         """
@@ -110,9 +113,10 @@ class PPHumanSegV2(MattingModel):
         else:
             mask = logits.squeeze()
 
-        # 4. Post-processing: Remove padding and resize back
-        mask_valid = mask[dy : dy + nh, dx : dx + nw]
-        mask_full = cv2.resize(mask_valid, (w_orig, h_orig), interpolation=cv2.INTER_LINEAR)
+        # 4. Post-processing: Remove letterbox padding, then upsample to original resolution
+        mask_valid = mask[dy : dy + nh, dx : dx + nw].astype(np.float32)
+        upsampled = self._apply_upsampler(mask_valid, frame)
+        if upsampled.shape[:2] != (h_orig, w_orig):
+            upsampled = cv2.resize(upsampled, (w_orig, h_orig), interpolation=cv2.INTER_LINEAR)
 
-        return mask_full.astype(np.float32)
-
+        return upsampled.astype(np.float32)

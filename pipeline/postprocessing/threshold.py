@@ -1,3 +1,5 @@
+"""Threshold postprocessor — binarises the mask at a configurable cutoff value."""
+
 import numpy as np
 from core.base import Postprocessor
 from core.parameters import ParameterSpec
@@ -11,6 +13,7 @@ class Threshold(Postprocessor):
 
     @classmethod
     def parameter_specs(cls):
+        """Return the list of tunable parameters for this component."""
         return [
             ParameterSpec(
                 name="cutoff",

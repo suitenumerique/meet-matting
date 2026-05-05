@@ -1,3 +1,5 @@
+"""Sigmoid postprocessor — sharpens soft mask edges by remapping probabilities through a sigmoid."""
+
 import numpy as np
 from core.base import Postprocessor
 from core.parameters import ParameterSpec
@@ -11,6 +13,7 @@ class Sigmoid(Postprocessor):
 
     @classmethod
     def parameter_specs(cls):
+        """Return the list of tunable parameters for this component."""
         return [
             ParameterSpec(
                 name="gain",
@@ -35,18 +38,18 @@ class Sigmoid(Postprocessor):
         gain = float(self.params["gain"])
 
         # Pre-compute normalization constants (scalars — free)
-        s0 = 1.0 / (1.0 + np.exp(gain * 0.5))     # σ(0)
-        s1 = 1.0 / (1.0 + np.exp(-gain * 0.5))     # σ(1)
+        s0 = 1.0 / (1.0 + np.exp(gain * 0.5))  # σ(0)
+        s1 = 1.0 / (1.0 + np.exp(-gain * 0.5))  # σ(1)
         inv_range = np.float32(1.0 / (s1 - s0))
         s0_f32 = np.float32(s0)
 
         # Single in-place pass: avoid creating (x - 0.5) temporary
         # exponent = -gain * (mask - 0.5)
-        exponent = np.subtract(mask, 0.5)      # in-place candidate
+        exponent = np.subtract(mask, 0.5)  # in-place candidate
         exponent *= -gain
-        np.exp(exponent, out=exponent)          # exp in-place
-        exponent += 1.0                         # 1 + exp(...)
-        np.reciprocal(exponent, out=exponent)   # 1 / (1 + exp(...))
+        np.exp(exponent, out=exponent)  # exp in-place
+        exponent += 1.0  # 1 + exp(...)
+        np.reciprocal(exponent, out=exponent)  # 1 / (1 + exp(...))
 
         # Normalize so f(0)=0, f(1)=1
         exponent -= s0_f32

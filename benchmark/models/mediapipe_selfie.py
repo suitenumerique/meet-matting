@@ -36,9 +36,11 @@ class BaseMediapipeWrapper(BaseModelWrapper):
 
     @property
     def input_size(self) -> tuple[int, int] | None:
+        """Return the fixed 256×256 input size."""
         return (256, 256)
 
     def load(self) -> None:
+        """Download weights if needed and initialise the inference session."""
         try:
             import mediapipe as mp
             from mediapipe.tasks.python import BaseOptions
@@ -74,6 +76,7 @@ class BaseMediapipeWrapper(BaseModelWrapper):
         self._frame_count = 0
 
     def reset_state(self) -> None:
+        """Clear temporal state by reloading the segmenter and resetting the frame counter."""
         self._frame_count = 0
         if self._segmenter is not None:
             try:
@@ -84,10 +87,20 @@ class BaseMediapipeWrapper(BaseModelWrapper):
             self.load()
 
     def get_flops(self, input_shape: tuple[int, int, int] = (3, 256, 256)) -> float:
+        """Return estimated FLOPs based on the model variant."""
         estimates = {"portrait": 7.5e6, "selfie_multiclass": 9.2e6, "landscape": 8.1e6}
         return estimates.get(self._variant, 8.0e6)
 
     def predict(self, frame_bgr: np.ndarray, frame_rgb: np.ndarray | None = None) -> np.ndarray:
+        """Run inference on a BGR frame and return a float32 confidence mask.
+
+        Args:
+            frame_bgr:  BGR image (H, W, 3), dtype uint8.
+            frame_rgb:  Pre-converted RGB version, or None to convert internally.
+
+        Returns:
+            Alpha matte (H, W), dtype float32, values in [0, 1].
+        """
         if self._segmenter is None:
             raise RuntimeError(
                 f"MediaPipe ({self._variant}): modèle non chargé. Appelle load() d'abord."
@@ -123,6 +136,7 @@ class BaseMediapipeWrapper(BaseModelWrapper):
             return np.zeros((h_orig, w_orig), dtype=np.float32)
 
     def cleanup(self) -> None:
+        """Close the MediaPipe segmenter and release resources."""
         if self._segmenter:
             self._segmenter.close()
         self._segmenter = None
@@ -133,6 +147,7 @@ class MediapipePortraitWrapper(BaseMediapipeWrapper):
 
     @property
     def name(self) -> str:
+        """Return the model name."""
         return "MediaPipe Portrait"
 
 
@@ -141,4 +156,5 @@ class MediapipeLandscapeWrapper(BaseMediapipeWrapper):
 
     @property
     def name(self) -> str:
+        """Return the model name."""
         return "MediaPipe Landscape"

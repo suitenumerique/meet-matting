@@ -1,3 +1,5 @@
+"""Linear (bilinear) upsampler — fast no-frills bicubic resize with no edge guidance."""
+
 import cv2
 import numpy as np
 from core.base import UpsamplingMethod
@@ -11,6 +13,7 @@ class Linear(UpsamplingMethod):
 
     @classmethod
     def parameter_specs(cls):
+        """Return the list of tunable parameters for this component."""
         return []
 
     def _upsample_impl(self, low_res_mask: np.ndarray, guide: np.ndarray) -> np.ndarray:

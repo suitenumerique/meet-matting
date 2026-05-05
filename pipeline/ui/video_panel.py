@@ -1,3 +1,5 @@
+"""Streamlit 2×2 panel for comparing the original frame, composite, raw mask, and final mask."""
+
 import numpy as np
 import streamlit as st
 

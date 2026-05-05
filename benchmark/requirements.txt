@@ -15,9 +15,6 @@ torchvision>=0.15.0
 # MediaPipe
 mediapipe>=0.10.0
 
-# FLOPs (optionnel, pour mesure précise)
-fvcore>=0.1.5
-
 # Vidéo (Export rapide)
 imageio>=2.30.0
 imageio-ffmpeg>=0.4.0

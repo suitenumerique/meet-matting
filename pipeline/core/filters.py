@@ -9,14 +9,15 @@ stabilise landmark coordinates, bounding-box positions, or any continuous
 signal. For dense pixel-array smoothing see postprocessing/one_euro.py which
 vectorises the same mathematics over numpy arrays.
 """
+
 from __future__ import annotations
 
 import math
 
-
 # ---------------------------------------------------------------------------
 # Internal helper -- shared by this module and postprocessing/one_euro.py
 # ---------------------------------------------------------------------------
+
 
 def alpha_from_cutoff(cutoff: float, f_s: float) -> float:
     """Return the EMA coefficient for a given cutoff frequency and sample rate.
@@ -34,6 +35,7 @@ def alpha_from_cutoff(cutoff: float, f_s: float) -> float:
 # ---------------------------------------------------------------------------
 # 1-D scalar filter
 # ---------------------------------------------------------------------------
+
 
 class OneEuroFilter1D:
     """One Euro Filter applied to a scalar (1-D) signal.
@@ -70,6 +72,7 @@ class OneEuroFilter1D:
         beta: float = 0.007,
         d_cutoff: float = 1.0,
     ) -> None:
+        """Initialise filter hyperparameters and reset internal state."""
         self.f_s = f_s
         self.min_cutoff = min_cutoff
         self.beta = beta
@@ -100,6 +103,7 @@ class OneEuroFilter1D:
         return self._x_hat
 
     def reset(self) -> None:
+        """Clear internal state; called by the pipeline between videos."""
         self._x_hat = None
         self._dx_hat = 0.0
 
@@ -107,6 +111,7 @@ class OneEuroFilter1D:
 # ---------------------------------------------------------------------------
 # Multi-dimensional wrappers
 # ---------------------------------------------------------------------------
+
 
 class OneEuroFilter2D:
     """One Euro Filter for a 2-D coordinate (x, y).
@@ -122,14 +127,17 @@ class OneEuroFilter2D:
         beta: float = 0.007,
         d_cutoff: float = 1.0,
     ) -> None:
+        """Initialise two independent 1D filters sharing the same hyperparameters."""
         kw = dict(f_s=f_s, min_cutoff=min_cutoff, beta=beta, d_cutoff=d_cutoff)
         self._fx = OneEuroFilter1D(**kw)
         self._fy = OneEuroFilter1D(**kw)
 
     def __call__(self, x: float, y: float) -> tuple[float, float]:
+        """Filter a 2-D coordinate and return the smoothed (x, y) estimate."""
         return self._fx(x), self._fy(y)
 
     def reset(self) -> None:
+        """Clear internal state; called by the pipeline between videos."""
         self._fx.reset()
         self._fy.reset()
 
@@ -144,15 +152,18 @@ class OneEuroFilter3D:
         beta: float = 0.007,
         d_cutoff: float = 1.0,
     ) -> None:
+        """Initialise three independent 1D filters sharing the same hyperparameters."""
         kw = dict(f_s=f_s, min_cutoff=min_cutoff, beta=beta, d_cutoff=d_cutoff)
         self._fx = OneEuroFilter1D(**kw)
         self._fy = OneEuroFilter1D(**kw)
         self._fz = OneEuroFilter1D(**kw)
 
     def __call__(self, x: float, y: float, z: float) -> tuple[float, float, float]:
+        """Filter a 3-D coordinate and return the smoothed (x, y, z) estimate."""
         return self._fx(x), self._fy(y), self._fz(z)
 
     def reset(self) -> None:
+        """Clear internal state; called by the pipeline between videos."""
         self._fx.reset()
         self._fy.reset()
         self._fz.reset()

@@ -102,6 +102,7 @@ class VideoPrefetcher:
     def __init__(
         self, video_path: Path, queue_size: int = 128, target_size: tuple[int, int] | None = None
     ):
+        """Initialise with params and allocate internal buffers."""
         self.video_path = video_path
         self.queue: queue.Queue[np.ndarray] = queue.Queue(maxsize=queue_size)
         self.target_size = target_size  # (W, H)
@@ -109,10 +110,12 @@ class VideoPrefetcher:
         self.thread = threading.Thread(target=self._run, daemon=True)
 
     def start(self):
+        """Start the background reader thread and return self for chaining."""
         self.thread.start()
         return self
 
     def _run(self):
+        """Background thread: read frames from the video file into the queue."""
         cap = cv2.VideoCapture(str(self.video_path))
         while not self.stopped:
             if not self.queue.full():
@@ -131,6 +134,7 @@ class VideoPrefetcher:
         cap.release()
 
     def __iter__(self):
+        """Yield frames from the queue until the video is exhausted."""
         while not self.stopped or not self.queue.empty():
             try:
                 frame = self.queue.get(timeout=1.0)
@@ -139,6 +143,7 @@ class VideoPrefetcher:
                 continue
 
     def stop(self):
+        """Signal the reader thread to stop and wait for it to finish."""
         self.stopped = True
         if self.thread.is_alive():
             self.thread.join(timeout=1.0)
@@ -201,6 +206,7 @@ def _load_ground_truth_masks(gt_dir: Path, num_frames: int) -> list[np.ndarray]:
     use_chroma: bool | None = None  # determined on first readable frame
 
     def _frame_to_mask(frame: np.ndarray) -> np.ndarray:
+        """Convert a single GT frame to a uint8/float32 mask, auto-detecting chroma-key on first call."""
         nonlocal use_chroma
         if frame.ndim == 3 and frame.shape[2] >= 3:
             if use_chroma is None:
@@ -261,6 +267,7 @@ def _save_masks(masks: list[np.ndarray], output_dir: Path, start_idx: int = 0) -
     output_dir.mkdir(parents=True, exist_ok=True)
 
     def _save_single(idx, mask):
+        """Save a single mask PNG at minimum compression for maximum speed."""
         if mask.dtype == np.uint8:
             mask_u8 = mask
         else:

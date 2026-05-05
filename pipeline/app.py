@@ -1,4 +1,7 @@
+"""Streamlit application entry point for the Matting Pipeline Lab."""
+
 import os
+
 os.environ["OPENCV_AVFOUNDATION_SKIP_AUTH"] = "0"
 
 import time
@@ -8,23 +11,45 @@ import json
 import threading
 import queue
 import time
+import urllib.request
 from datetime import datetime
 from pathlib import Path
 
-import streamlit as st
+import cv2
 import numpy as np
+import streamlit as st
 from config import OUTPUT_DIR
 from core.pipeline import MattingPipeline
-from core.registry import models, postprocessors, preprocessors, skip_strategies, upsamplers
+from core.registry import (
+    compositors,
+    models,
+    postprocessors,
+    preprocessors,
+    skip_strategies,
+    upsamplers,
+)
 from core.video_io import frame_count, read_frame
 from core.video_processing import process_video
-from ui.sidebar import render_sidebar
+from ui.sidebar import _BG_IMAGE_URLS, render_sidebar
 from ui.synced_player import display_synced_player
 from ui.video_panel import display_four_panels
 
-import urllib.request
-import tempfile
-import cv2
+
+@st.cache_resource
+def _load_bg_image(name: str) -> np.ndarray | None:
+    """Download and cache a background image by name; returns an RGB uint8 array or None on failure."""
+    url = _BG_IMAGE_URLS.get(name)
+    if url is None:
+        return None
+    try:
+        resp = urllib.request.urlopen(url)
+        img = cv2.imdecode(np.asarray(bytearray(resp.read()), dtype="uint8"), 1)
+        if img is None:
+            return None
+        return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    except Exception:
+        return None
+
 
 # Auto-discover all plugins.
 preprocessors.discover("preprocessing")
@@ -32,6 +57,7 @@ models.discover("models")
 postprocessors.discover("postprocessing")
 upsamplers.discover("upsampling")
 skip_strategies.discover("skip_strategies")
+compositors.discover("compositing")
 
 st.set_page_config(layout="wide", page_title="Matting Pipeline Lab")
 
@@ -53,6 +79,7 @@ with st.sidebar.expander("Import Config", expanded=False):
 
     if should_apply:
         try:
+            assert uploaded_config is not None
             config_to_apply = json.load(uploaded_config)
 
             # Basic keys
@@ -123,7 +150,7 @@ with col_download:
         file_name=f"config_{selection.model_name.lower().replace(' ', '_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
         mime="application/json",
         width="stretch",
-        key="global_export_config"
+        key="global_export_config",
     )
 
 if selection.video_path is None:
@@ -154,7 +181,17 @@ if st.session_state.get("_model_key") != _model_key:
 model = st.session_state["_model"]
 pre_components = [preprocessors.get(name)(**params) for name, params in selection.preprocessors]
 post_components = [postprocessors.get(name)(**params) for name, params in selection.postprocessors]
-pipeline = MattingPipeline(pre_components, model, post_components, bg_color=selection.bg_color)
+_comp_name, _comp_params = selection.compositor
+compositor_instance = compositors.get(_comp_name)(**_comp_params)
+bg_image = _load_bg_image(selection.bg_image_name) if selection.bg_image_name else None
+pipeline = MattingPipeline(
+    pre_components,
+    model,
+    post_components,
+    compositor=compositor_instance,
+    bg_color=selection.bg_color,
+    bg_image=bg_image,
+)
 
 # ── TABS ───────────────────────────────────────────────────────────────────────
 tab_lab, tab_live = st.tabs(["📽️ Laboratoire Vidéo", "📸 Test Caméra"])
@@ -199,7 +236,9 @@ with tab_lab:
     with col_info:
         frames_to_process = (total + skip_frames - 1) // skip_frames
         strategy_name = selection.skip_strategy[0]
-        st.caption(f"Processing **{frames_to_process} frames** (Skip: {skip_frames}, Strategy: `{strategy_name}`).")
+        st.caption(
+            f"Processing **{frames_to_process} frames** (Skip: {skip_frames}, Strategy: `{strategy_name}`)."
+        )
 
     if run_clicked:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -227,13 +266,18 @@ with tab_lab:
         status = st.empty()
 
         def _on_progress(done, total_f, current_fps):
+            """Update the Streamlit progress bar and FPS status caption."""
             progress_bar.progress(done / max(total_f, 1))
             status.caption(f"Frame {done} / {total_f} | {current_fps:.1f} FPS")
 
         with st.spinner("Processing video..."):
             paths = process_video(
-                pipeline, selection.video_path, run_dir, _on_progress,
-                skip_frames=skip_frames, skip_strategy=strategy_instance
+                pipeline,
+                selection.video_path,
+                run_dir,
+                _on_progress,
+                skip_frames=skip_frames,
+                skip_strategy=strategy_instance,
             )
 
         st.success(f"Saved to `{run_dir.name}`")
@@ -246,7 +290,11 @@ with tab_lab:
         if not OUTPUT_DIR.exists():
             st.info("No saved runs yet.")
         else:
-            run_dirs = sorted([d for d in OUTPUT_DIR.iterdir() if d.is_dir()], key=lambda d: d.stat().st_mtime, reverse=True)
+            run_dirs = sorted(
+                [d for d in OUTPUT_DIR.iterdir() if d.is_dir()],
+                key=lambda d: d.stat().st_mtime,
+                reverse=True,
+            )
             run_names = [d.name for d in run_dirs]
             if not run_names:
                 st.info("No saved runs yet.")
@@ -255,13 +303,14 @@ with tab_lab:
                 rd = OUTPUT_DIR / selected_run
                 conf_p = rd / "config.json"
                 if conf_p.exists():
-                    with open(conf_p) as f: st.json(json.load(f))
-                
+                    with open(conf_p) as f:
+                        st.json(json.load(f))
+
                 v_paths = {
                     "original": rd / "original.mp4",
                     "mask": rd / "mask.mp4",
                     "raw": rd / "raw.mp4",
-                    "composite": rd / "composite.mp4"
+                    "composite": rd / "composite.mp4",
                 }
                 if all(p.exists() for p in v_paths.values()):
                     display_synced_player(v_paths)
@@ -272,17 +321,7 @@ with tab_live:
     st.subheader("Démo en temps réel")
     col_ctrl, col_stats = st.columns([3, 1])
     with col_ctrl:
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            bg_mode = st.selectbox(
-                "Arrière-plan",
-                ["Couleur sidebar", "Noir", "Flou (Portrait)", "Bureau Moderne", "Nature"],
-                index=0,
-            )
-        with c2:
-            live_skip = st.number_input("Skip Frames (Live)", min_value=1, value=1)
-        with c3:
-            show_panels = st.checkbox("Vue 4 panneaux", value=False)
+        show_panels = st.checkbox("Vue 4 panneaux", value=False)
     with col_stats:
         fps_placeholder = st.empty()
         inf_placeholder = st.empty()

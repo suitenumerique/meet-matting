@@ -1,3 +1,5 @@
+"""Pipeline configuration — root paths and supported video extensions."""
+
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent

@@ -1,3 +1,5 @@
+"""Video I/O utilities — list, count, and read individual frames from video files."""
+
 from __future__ import annotations
 
 from pathlib import Path

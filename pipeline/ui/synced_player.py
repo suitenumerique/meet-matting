@@ -13,9 +13,9 @@ from pathlib import Path
 import streamlit.components.v1 as components
 
 _LABELS: dict[str, str] = {
-    "original":  "Original",
-    "mask":      "Masque alpha (apres post-process)",
-    "raw":       "Composite brut (sans post-process)",
+    "original": "Original",
+    "mask": "Masque alpha (apres post-process)",
+    "raw": "Composite brut (sans post-process)",
     "composite": "Composite final (apres post-process)",
 }
 
@@ -45,7 +45,7 @@ def display_synced_player(paths: dict[str, Path], height: int = 1100) -> None:
             f'<video class="sv" src="data:video/mp4;base64,{b64}"'
             f' style="width:100%;max-height:480px;object-fit:contain;'
             f'border-radius:4px;background:#000;" controls preload="auto"></video>'
-            f'</div>'
+            f"</div>"
         )
 
     if not video_divs:

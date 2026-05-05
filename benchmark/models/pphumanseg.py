@@ -40,19 +40,23 @@ class PPHumanSegV2Wrapper(BaseModelWrapper):
         self,
         model_path: str | None = None,
     ):
+        """Initialise with an optional custom ONNX model path."""
         self._model_path = Path(model_path) if model_path else _DEFAULT_MODEL_PATH
         self._session: Any = None
         self._input_name: str | None = None
 
     @property
     def name(self) -> str:
+        """Return the model name."""
         return "PP-HumanSeg V2"
 
     @property
     def input_size(self) -> tuple[int, int] | None:
+        """Return the fixed 192×192 input size."""
         return (self._INPUT_H, self._INPUT_W)
 
     def load(self) -> None:
+        """Download weights if needed and initialise the inference session."""
         try:
             import onnxruntime as ort
         except ImportError as e:
@@ -153,12 +157,12 @@ class PPHumanSegV2Wrapper(BaseModelWrapper):
         """
         Exécute l'inférence sur un lot de frames BGR.
         """
-        # Pour PP-HumanSeg, on réutilise predict car le batching natif ONNX 
+        # Pour PP-HumanSeg, on réutilise predict car le batching natif ONNX
         # compliquerait la gestion des différentes tailles d'entrée/padding.
         return [self.predict(f) for f in frames_bgr]
 
-
     def get_flops(self, input_shape: tuple[int, int, int] = (3, 192, 192)) -> float:
+        """Return estimated FLOPs (~90 MFLOPs at 192×192)."""
         # PP-HumanSeg V2 : ~90 MFLOPs à 192x192
         c, h, w = input_shape
         base_flops = 90e6
@@ -166,5 +170,6 @@ class PPHumanSegV2Wrapper(BaseModelWrapper):
         return base_flops * scale
 
     def cleanup(self) -> None:
+        """Release the ONNX inference session."""
         self._session = None
         logger.info("PP-HumanSeg V2: session ONNX fermée.")

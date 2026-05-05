@@ -64,4 +64,3 @@ dist/
 # Claude Code
 CLAUDE.md
 .claude/
-claude_pipeline_architecture.md

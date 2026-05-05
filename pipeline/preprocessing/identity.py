@@ -1,3 +1,5 @@
+"""Identity preprocessor — passes the frame through unchanged (no-op baseline)."""
+
 from core.base import Preprocessor
 from core.registry import preprocessors
 
@@ -9,6 +11,7 @@ class Identity(Preprocessor):
 
     @classmethod
     def parameter_specs(cls):
+        """Return the list of tunable parameters for this component."""
         return []
 
     def __call__(self, frame):

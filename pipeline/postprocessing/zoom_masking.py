@@ -16,12 +16,26 @@ class PersonZoomMasking(Postprocessor):
 
     @classmethod
     def parameter_specs(cls):
+        """Return the list of tunable parameters for this component."""
         return []  # No params needed
 
     def reset(self):
+        """No temporal state to clear."""
         pass
 
     def __call__(self, mask: np.ndarray, original_frame: np.ndarray) -> np.ndarray:
+        """Zero out *mask* outside the bounding boxes stored in the shared context.
+
+        Reads ``person_bboxes`` and ``person_zoom_active`` from :mod:`core.context`.
+        If zoom is not active or no boxes are present, *mask* is returned unchanged.
+
+        Args:
+            mask:           Alpha matte, shape (H, W), dtype float32, range [0, 1].
+            original_frame: Original RGB frame, shape (H, W, 3), dtype uint8 (unused).
+
+        Returns:
+            Masked alpha matte — zeroed outside detected bounding boxes.
+        """
         bboxes = context.get_val("person_bboxes", [])
         zoom_active = context.get_val("person_zoom_active", False)
 

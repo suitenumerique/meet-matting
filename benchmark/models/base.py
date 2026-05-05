@@ -105,4 +105,5 @@ class BaseModelWrapper(ABC):
         pass
 
     def __repr__(self) -> str:
+        """Return a human-readable string representation."""
         return f"<{self.__class__.__name__} '{self.name}'>"

@@ -1,3 +1,5 @@
+"""Abstract base classes that define the data contracts for every pipeline component."""
+
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
@@ -140,7 +142,45 @@ class SkipStrategy(Component, ABC):
         current_frame: np.ndarray,
         prev_frame: np.ndarray,
         prev_mask: np.ndarray,
-    ) -> np.ndarray: ...
+    ) -> np.ndarray:
+        """Produce a mask for *current_frame* without running the model.
+
+        Args:
+            current_frame: RGB frame to fill, shape (H, W, 3), dtype uint8.
+            prev_frame:    Last frame that was actually inferred, shape (H, W, 3), dtype uint8.
+            prev_mask:     Mask from the last inferred frame, shape (H, W), dtype float32, [0, 1].
+
+        Returns:
+            Estimated mask for *current_frame*, shape (H, W), dtype float32, [0, 1].
+        """
+        ...
+
+
+class Compositor(Component, ABC):
+    """Composites the masked foreground over the background.
+
+    Data contract:
+        composite receives:
+            fg:    np.ndarray, shape (H, W, 3), dtype uint8, RGB.
+            bg:    np.ndarray, shape (H, W, 3), dtype float32, range [0, 255].
+            alpha: np.ndarray, shape (H, W),   dtype float32, range [0, 1].
+        composite returns:
+            np.ndarray, shape (H, W, 3), dtype uint8, RGB.
+    """
+
+    @abstractmethod
+    def composite(self, fg: np.ndarray, bg: np.ndarray, alpha: np.ndarray) -> np.ndarray:
+        """Composite *fg* over *bg* using *alpha*.
+
+        Args:
+            fg:    Foreground RGB frame, shape (H, W, 3), dtype uint8.
+            bg:    Background, shape (H, W, 3), dtype float32, range [0, 255].
+                   Already resized to match fg by the pipeline.
+            alpha: Alpha matte, shape (H, W), dtype float32, range [0, 1].
+
+        Returns:
+            Composited image, shape (H, W, 3), dtype uint8.
+        """
 
 
 class UpsamplingMethod(Component, ABC):
@@ -157,15 +197,16 @@ class UpsamplingMethod(Component, ABC):
     def upsample(self, low_res_mask: np.ndarray, guide: np.ndarray) -> np.ndarray:
         """Upsample *low_res_mask* to the resolution of *guide* with profiling."""
         import time
+
         from core import context
-        
+
         t_start = time.perf_counter()
         result = self._upsample_impl(low_res_mask, guide)
-        
+
         # On accumule le temps (utile si plusieurs upsamplings par frame, ex: Person Zoom)
         current = context.get_val("upsampling_time", 0.0)
         context.set_val("upsampling_time", current + (time.perf_counter() - t_start))
-        
+
         return result
 
     @abstractmethod

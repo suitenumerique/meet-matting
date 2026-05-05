@@ -1,3 +1,5 @@
+"""Optical-flow warp skip strategy — fills skipped frames by warping the previous mask with DIS flow."""
+
 import cv2
 import numpy as np
 from core.base import SkipStrategy
@@ -34,6 +36,7 @@ class OpticalFlowWarp(SkipStrategy):
 
     @classmethod
     def parameter_specs(cls):
+        """Return the list of tunable parameters for this component."""
         return [
             ParameterSpec(
                 name="flow_method",
@@ -62,6 +65,7 @@ class OpticalFlowWarp(SkipStrategy):
         ]
 
     def reset(self):
+        """No temporal state to clear."""
         pass
 
     def __call__(
@@ -70,6 +74,18 @@ class OpticalFlowWarp(SkipStrategy):
         prev_frame: np.ndarray,
         prev_mask: np.ndarray,
     ) -> np.ndarray:
+        """Estimate mask for *current_frame* by warping *prev_mask* with optical flow.
+
+        Flow is computed at 1/4 resolution for speed, then scaled back up.
+
+        Args:
+            current_frame: RGB frame to fill, shape (H, W, 3), dtype uint8.
+            prev_frame:    Last inferred frame, shape (H, W, 3), dtype uint8.
+            prev_mask:     Mask from the last inferred frame, shape (H, W), float32, [0, 1].
+
+        Returns:
+            Warped mask for *current_frame*, shape (H, W), dtype float32, [0, 1].
+        """
         method = self.params["flow_method"]
         blend = float(self.params["blend"])
 
@@ -84,13 +100,15 @@ class OpticalFlowWarp(SkipStrategy):
         # Backward flow: for each pixel in current_frame, where does it come from in prev_frame.
         # We compute flow from current → prev so that remap(prev_mask, flow) lands in the right spot.
         if method in _DIS_PRESETS:
-            dis = cv2.DISOpticalFlow_create(_DIS_PRESETS[method])
-            flow = dis.calc(current_gray, prev_gray, None)
+            dis = cv2.DISOpticalFlow_create(_DIS_PRESETS[method])  # type: ignore[attr-defined]
+            flow = dis.calc(
+                current_gray, prev_gray, np.zeros((*current_gray.shape, 2), dtype=np.float32)
+            )
         else:  # farneback
             flow = cv2.calcOpticalFlowFarneback(
                 current_gray,
                 prev_gray,
-                flow=None,
+                flow=np.zeros((*current_gray.shape, 2), dtype=np.float32),
                 pyr_scale=0.5,
                 levels=3,
                 winsize=15,

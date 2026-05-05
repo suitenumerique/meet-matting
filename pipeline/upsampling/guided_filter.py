@@ -1,3 +1,5 @@
+"""Guided filter upsampler — edge-aware refinement using cv2.ximgproc.guidedFilter."""
+
 import cv2
 import numpy as np
 from core.base import UpsamplingMethod
@@ -15,6 +17,7 @@ class GuidedFilter(UpsamplingMethod):
 
     @classmethod
     def parameter_specs(cls):
+        """Return the list of tunable parameters for this component."""
         return [
             ParameterSpec(
                 name="radius",
@@ -28,11 +31,11 @@ class GuidedFilter(UpsamplingMethod):
             ),
             ParameterSpec(
                 name="eps",
-                type="float",
+                type="number",
                 default=1e-2,
                 label="Epsilon",
                 min_value=1e-4,
-                max_value=0.1,
+                max_value=1.0,
                 step=1e-4,
                 help="Regularisation (guide normalised to [0,1]). Literature: 1e-5–0.1. "
                 "Smaller = edges preserved more aggressively. Fine matting: ~1e-4; smooth blending: ~0.05.",

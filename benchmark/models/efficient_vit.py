@@ -39,19 +39,23 @@ class EfficientViTWrapper(BaseModelWrapper):
     PERSON_CLASS_INDEX = 12
 
     def __init__(self, model_path: str | None = None):
+        """Initialise with an optional custom ONNX model path."""
         self._model_path = Path(model_path) if model_path else _DEFAULT_MODEL_PATH
         self._session: Any = None
         self._input_name: str | None = None
 
     @property
     def name(self) -> str:
+        """Return the model name."""
         return "EfficientViT"
 
     @property
     def input_size(self) -> tuple[int, int] | None:
+        """Return the fixed 224×224 input size."""
         return (self._INPUT_SIZE, self._INPUT_SIZE)
 
     def load(self) -> None:
+        """Download weights if needed and initialise the inference session."""
         try:
             import onnxruntime as ort
         except ImportError as e:
@@ -120,9 +124,18 @@ class EfficientViTWrapper(BaseModelWrapper):
             self._session = None
 
     def predict(self, frame_bgr: np.ndarray) -> np.ndarray:
+        """Run inference on a single BGR frame; delegates to predict_batch."""
         return self.predict_batch([frame_bgr])[0]
 
     def predict_batch(self, frames_bgr: list[np.ndarray]) -> list[np.ndarray]:
+        """Run inference on a batch of BGR frames and return float32 masks.
+
+        Args:
+            frames_bgr: List of BGR images (H, W, 3), dtype uint8.
+
+        Returns:
+            List of alpha mattes (H, W), dtype float32, values in [0, 1].
+        """
         if not frames_bgr:
             return []
 
@@ -265,6 +278,7 @@ class EfficientViTWrapper(BaseModelWrapper):
         return masks
 
     def get_flops(self, input_shape: tuple[int, int, int] = (3, 512, 512)) -> float:
+        """Return estimated FLOPs scaled from ~5 GFLOPs at 512×512."""
         # EfficientViT-L1 : ~5 GFLOPs à 512x512
         c, h, w = input_shape
         base_flops = 5e9
@@ -272,5 +286,6 @@ class EfficientViTWrapper(BaseModelWrapper):
         return base_flops * scale
 
     def cleanup(self) -> None:
+        """Release the ONNX inference session."""
         self._session = None
         logger.info("EfficientViT: session ONNX fermée.")

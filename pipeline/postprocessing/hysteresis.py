@@ -21,11 +21,13 @@ class HysteresisThreshold(Postprocessor):
     description = "Stable binarization: activates at T_high, deactivates below T_low. Eliminates boundary flicker."
 
     def __init__(self, **params):
+        """Initialise with params and allocate internal buffers."""
         super().__init__(**params)
         self._prev_mask: np.ndarray | None = None
 
     @classmethod
     def parameter_specs(cls):
+        """Return the list of tunable parameters for this component."""
         return [
             ParameterSpec(
                 name="t_high",
@@ -50,9 +52,19 @@ class HysteresisThreshold(Postprocessor):
         ]
 
     def reset(self):
+        """Clear internal state; called by the pipeline between videos."""
         self._prev_mask = None
 
     def __call__(self, mask: np.ndarray, original_frame: np.ndarray) -> np.ndarray:
+        """Apply hysteresis thresholding to *mask* using stored pixel states.
+
+        Args:
+            mask:           Alpha matte, shape (H, W), dtype float32, range [0, 1].
+            original_frame: Original RGB frame, shape (H, W, 3), dtype uint8 (unused).
+
+        Returns:
+            Binary alpha matte, shape (H, W), dtype float32, values in {0.0, 1.0}.
+        """
         t_high = self.params["t_high"]
         t_low = self.params["t_low"]
 

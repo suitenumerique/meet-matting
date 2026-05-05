@@ -24,9 +24,11 @@ class MediapipeSelfieMulticlassWrapper(BaseMediapipeWrapper):
 
     @property
     def name(self) -> str:
+        """Return the model name."""
         return "MediaPipe Selfie Multiclass"
 
     def load(self) -> None:
+        """Download weights if needed and initialise the inference session."""
         # Override load pour utiliser les bons URLs localement si besoin,
         # ou on injecte l'URL dans la classe parente.
         # Pour simplifier, on duplique la logique de chargement ou on l'adapte.

@@ -1,17 +1,21 @@
+"""Component registry: decorator-based auto-registration and discovery for pipeline components."""
+
 from __future__ import annotations
 
 import importlib
 import pkgutil
+from typing import Any
 
 
 class Registry:
     """Auto-discovery registry for pipeline components."""
 
     def __init__(self, label: str):
+        """Initialise an empty registry with a human-readable *label* for error messages."""
         self._label = label
-        self._store: dict[str, type] = {}
+        self._store: dict[str, type[Any]] = {}
 
-    def register(self, cls: type) -> type:
+    def register(self, cls: type[Any]) -> type[Any]:
         """Decorator that registers *cls* under ``cls.name``.
 
         Raises:
@@ -39,7 +43,7 @@ class Registry:
             if not module_name.startswith("_"):
                 importlib.import_module(f"{package_name}.{module_name}")
 
-    def get(self, name: str) -> type:
+    def get(self, name: str) -> type[Any]:
         """Return the class registered under *name*.
 
         Raises:
@@ -60,3 +64,4 @@ models = Registry("models")
 postprocessors = Registry("postprocessors")
 upsamplers = Registry("upsamplers")
 skip_strategies = Registry("skip_strategies")
+compositors = Registry("compositors")

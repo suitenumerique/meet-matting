@@ -25,11 +25,13 @@ class TemporalMedian(Postprocessor):
     description = "Removes single-frame spikes by returning the median of the last N frames."
 
     def __init__(self, **params):
+        """Initialise with params and allocate the frame buffer."""
         super().__init__(**params)
         self._buffer: deque | None = None
 
     @classmethod
     def parameter_specs(cls):
+        """Return the list of tunable parameters for this component."""
         return [
             ParameterSpec(
                 name="n_frames",
@@ -44,9 +46,19 @@ class TemporalMedian(Postprocessor):
         ]
 
     def reset(self):
+        """Clear the frame buffer so the filter re-initialises on the next frame."""
         self._buffer = None
 
     def __call__(self, mask: np.ndarray, original_frame: np.ndarray) -> np.ndarray:
+        """Return the pixel-wise median over the last N frames including *mask*.
+
+        Args:
+            mask:           Alpha matte, shape (H, W), dtype float32, range [0, 1].
+            original_frame: Original RGB frame, shape (H, W, 3), dtype uint8 (unused).
+
+        Returns:
+            Median-filtered mask, shape (H, W), dtype float32, range [0, 1].
+        """
         n = self.params["n_frames"]
 
         if self._buffer is None or self._buffer[0].shape != mask.shape:

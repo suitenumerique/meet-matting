@@ -1,7 +1,9 @@
+"""Parameter specification dataclass used by components to declare their tunable parameters."""
+
 from dataclasses import dataclass
 from typing import Any, Literal
 
-ParamType = Literal["int", "float", "bool", "str", "choice"]
+ParamType = Literal["int", "float", "bool", "str", "choice", "number"]
 
 
 @dataclass
