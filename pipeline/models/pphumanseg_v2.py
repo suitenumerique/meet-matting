@@ -109,8 +109,10 @@ class PPHumanSegV2(MattingModel):
         else:
             mask = logits.squeeze()
 
-        # 4. Post-processing: Remove padding and resize back
-        mask_valid = mask[dy : dy + nh, dx : dx + nw]
-        mask_full = cv2.resize(mask_valid, (w_orig, h_orig), interpolation=cv2.INTER_LINEAR)
+        # 4. Post-processing: Remove letterbox padding, then upsample to original resolution
+        mask_valid = mask[dy : dy + nh, dx : dx + nw].astype(np.float32)
+        upsampled = self._apply_upsampler(mask_valid, frame)
+        if upsampled.shape[:2] != (h_orig, w_orig):
+            upsampled = cv2.resize(upsampled, (w_orig, h_orig), interpolation=cv2.INTER_LINEAR)
 
-        return mask_full.astype(np.float32)
+        return upsampled.astype(np.float32)

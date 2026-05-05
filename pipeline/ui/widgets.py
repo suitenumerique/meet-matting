@@ -24,6 +24,17 @@ def render_widget(spec: ParameterSpec, key: str):
             help=spec.help,
             key=key,
         )
+    if spec.type == "number":
+        return st.number_input(
+            spec.label,
+            min_value=float(spec.min_value) if spec.min_value is not None else None,
+            max_value=float(spec.max_value) if spec.max_value is not None else None,
+            value=float(spec.default),
+            step=float(spec.step) if spec.step is not None else 1e-4,
+            format="%.2e",
+            help=spec.help,
+            key=key,
+        )
     if spec.type == "bool":
         return st.checkbox(spec.label, bool(spec.default), help=spec.help, key=key)
     if spec.type == "choice":

@@ -28,11 +28,11 @@ class GuidedFilter(UpsamplingMethod):
             ),
             ParameterSpec(
                 name="eps",
-                type="float",
+                type="number",
                 default=1e-2,
                 label="Epsilon",
                 min_value=1e-4,
-                max_value=0.1,
+                max_value=1.0,
                 step=1e-4,
                 help="Regularisation (guide normalised to [0,1]). Literature: 1e-5–0.1. "
                 "Smaller = edges preserved more aggressively. Fine matting: ~1e-4; smooth blending: ~0.05.",

@@ -67,12 +67,12 @@ class GuidedFilter(Postprocessor):
             ),
             ParameterSpec(
                 name="eps",
-                type="float",
-                default=1e-6,
+                type="number",
+                default=1e-4,
                 label="Regularization (eps)",
-                min_value=1e-6,
-                max_value=0.1,
-                step=0.001,
+                min_value=1e-4,
+                max_value=1.0,
+                step=1e-4,
                 help="Edge sensitivity. Higher values reduce edge sharpness.",
             ),
         ]
