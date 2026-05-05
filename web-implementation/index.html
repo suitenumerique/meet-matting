@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MediaPipe Multiclass Segmentation</title>
+    <link rel="stylesheet" href="style.css">
+    <!-- MediaPipe Tasks Vision -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest" crossorigin="anonymous"></script>
+</head>
+<body>
+    <div class="container">
+        <h1>MediaPipe Multiclass Segmenter</h1>
+        <div class="video-container">
+            <video id="webcam" autoplay playsinline></video>
+            <canvas id="output_canvas"></canvas>
+        </div>
+        <div id="status">Chargement du modèle...</div>
+        <div id="labels"></div>
+    </div>
+    <script src="script.js" type="module"></script>
+</body>
+</html>
