@@ -16,11 +16,15 @@ _POSE_MODEL_URL = "https://storage.googleapis.com/mediapipe-models/pose_landmark
 
 
 class PersonDetector:
+    """EfficientDet-Lite0 object detector restricted to the 'person' class."""
+
     def __init__(self, score_threshold: float = 0.25):
+        """Initialise with a minimum detection confidence threshold."""
         self._detector = None
         self._score_threshold = score_threshold
 
     def load(self):
+        """Download weights if needed and initialise the MediaPipe object detector."""
         try:
             import mediapipe as mp
             from mediapipe.tasks.python import BaseOptions
@@ -85,10 +89,12 @@ class PoseDetector:
     """Uses MediaPipe Pose to find person bounding boxes based on keypoints."""
 
     def __init__(self, min_pose_presence_confidence: float = 0.5):
+        """Initialise with a minimum pose-presence confidence threshold."""
         self._landmarker = None
         self._conf = min_pose_presence_confidence
 
     def load(self):
+        """Download weights if needed and initialise the MediaPipe pose landmarker."""
         try:
             import mediapipe as mp
             from mediapipe.tasks.python import BaseOptions
@@ -168,12 +174,14 @@ class YoloDetector:
     _MODEL_CACHE: dict[tuple[str, float], tuple[object, str]] = {}
 
     def __init__(self, model_size: str = "n", score_threshold: float = 0.25):
+        """Initialise with a YOLO model size variant and detection confidence threshold."""
         self._model = None
         self._size = model_size
         self._conf = score_threshold
         self._device = "cpu"
 
     def load(self):
+        """Download weights if needed and initialise the YOLO model (CPU only for stability)."""
         cache_key = (self._size, self._conf)
         if cache_key in self._MODEL_CACHE:
             self._model, self._device = self._MODEL_CACHE[cache_key]
@@ -260,10 +268,12 @@ class FaceDetector:
     """Uses MediaPipe Face Detector (BlazeFace) to find faces."""
 
     def __init__(self, min_detection_confidence: float = 0.5):
+        """Initialise with a minimum face-detection confidence threshold."""
         self._detector = None
         self._conf = min_detection_confidence
 
     def load(self):
+        """Download weights if needed and initialise the MediaPipe face detector."""
         try:
             import mediapipe as mp
             from mediapipe.tasks.python import BaseOptions

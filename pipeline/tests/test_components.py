@@ -1,3 +1,5 @@
+"""Parametric tests verifying that every registered component honours the component contract."""
+
 import numpy as np
 import pytest
 from core.parameters import ParameterSpec
@@ -17,6 +19,7 @@ def _default_params(cls):
 
 @pytest.mark.parametrize("registry", REGISTRIES, ids=["preprocessors", "models", "postprocessors"])
 def test_parameter_specs_return_list_of_spec_objects(registry):
+    """Every component's parameter_specs() must return a list of ParameterSpec objects."""
     for name in registry.names():
         cls = registry.get(name)
         specs = cls.parameter_specs()
@@ -30,6 +33,7 @@ def test_parameter_specs_return_list_of_spec_objects(registry):
 
 @pytest.mark.parametrize("registry", REGISTRIES, ids=["preprocessors", "models", "postprocessors"])
 def test_instantiation_with_defaults_succeeds(registry):
+    """Every component must be constructible with its declared defaults — no missing required args."""
     for name in registry.names():
         cls = registry.get(name)
         params = _default_params(cls)
@@ -38,6 +42,7 @@ def test_instantiation_with_defaults_succeeds(registry):
 
 
 def test_gaussian_blur_even_kernel_does_not_crash():
+    """GaussianBlur must silently correct an even kernel_size to the next odd value."""
     from preprocessing.gaussian_blur import GaussianBlur
 
     blur = GaussianBlur(kernel_size=4, sigma=1.0)  # 4 is even — should be corrected internally

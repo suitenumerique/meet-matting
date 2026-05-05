@@ -40,12 +40,14 @@ class OneEuroFilterMask(Postprocessor):
     )
 
     def __init__(self, **params) -> None:
+        """Initialise with params and allocate per-pixel state buffers."""
         super().__init__(**params)
         self._x_hat: np.ndarray | None = None
         self._dx_hat: np.ndarray | None = None
 
     @classmethod
     def parameter_specs(cls) -> list[ParameterSpec]:
+        """Return the list of tunable parameters for this component."""
         return [
             ParameterSpec(
                 name="f_s",
@@ -90,10 +92,20 @@ class OneEuroFilterMask(Postprocessor):
         ]
 
     def reset(self) -> None:
+        """Clear per-pixel state so the filter re-initialises on the next frame."""
         self._x_hat = None
         self._dx_hat = None
 
     def __call__(self, mask: np.ndarray, original_frame: np.ndarray) -> np.ndarray:
+        """Apply one step of the One Euro Filter to *mask*.
+
+        Args:
+            mask:           Alpha matte, shape (H, W), dtype float32, range [0, 1].
+            original_frame: Original RGB frame, shape (H, W, 3), dtype uint8 (unused).
+
+        Returns:
+            Filtered mask, shape (H, W), dtype float32, range [0, 1].
+        """
         f_s = float(self.params["f_s"])
         min_cutoff = float(self.params["min_cutoff"])
         beta = float(self.params["beta"])

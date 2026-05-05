@@ -1,3 +1,5 @@
+"""MediaPipe Selfie Landscape segmenter — fast 256×256 TFLite binary segmenter for wide-format frames."""
+
 import urllib.request
 from pathlib import Path
 
@@ -27,6 +29,7 @@ class MediapipeSelfielandscape(MattingModel):
 
     @classmethod
     def parameter_specs(cls):
+        """Return the list of tunable parameters for this component."""
         return [
             ParameterSpec(
                 name="use_gpu",
@@ -38,6 +41,7 @@ class MediapipeSelfielandscape(MattingModel):
         ]
 
     def load(self, weights_path=None):
+        """Download weights if needed and initialise the inference session."""
         try:
             import mediapipe as mp
             from mediapipe.tasks.python import BaseOptions
@@ -60,7 +64,7 @@ class MediapipeSelfielandscape(MattingModel):
         delegate = BaseOptions.Delegate.GPU if self.params["use_gpu"] else BaseOptions.Delegate.CPU
         options = ImageSegmenterOptions(
             base_options=BaseOptions(model_asset_path=str(local_path), delegate=delegate),
-            running_mode=RunningMode.VIDEO,
+            running_mode=RunningMode.VIDEO,  # Pass to RunningMode.IMAGE if you proceed multiple crops per frame
             output_category_mask=False,
             output_confidence_masks=True,
         )

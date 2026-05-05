@@ -1,3 +1,5 @@
+"""Bilateral filter preprocessor — edge-preserving noise reduction before model inference."""
+
 import cv2
 import numpy as np
 from core.base import Preprocessor
@@ -12,6 +14,7 @@ class BilateralFilter(Preprocessor):
 
     @classmethod
     def parameter_specs(cls):
+        """Return the list of tunable parameters for this component."""
         return [
             ParameterSpec(
                 name="diameter",

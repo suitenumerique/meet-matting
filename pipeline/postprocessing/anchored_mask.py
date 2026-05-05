@@ -45,6 +45,7 @@ class AnchoredMask(Postprocessor):
 
     @classmethod
     def parameter_specs(cls):
+        """Return the list of tunable parameters for this component."""
         return [
             ParameterSpec(
                 name="anchor_threshold",
@@ -77,9 +78,19 @@ class AnchoredMask(Postprocessor):
         ]
 
     def reset(self):
+        """No temporal state to clear."""
         pass
 
     def __call__(self, mask: np.ndarray, original_frame: np.ndarray) -> np.ndarray:
+        """Remove background bleed by zeroing the mask outside the anchor-dilated zone.
+
+        Args:
+            mask:           Alpha matte, shape (H, W), dtype float32, range [0, 1].
+            original_frame: Original RGB frame, shape (H, W, 3), dtype uint8 (unused).
+
+        Returns:
+            Refined alpha matte, shape (H, W), dtype float32, range [0, 1].
+        """
         anchor_thr = float(self.params["anchor_threshold"])
         expand_px = int(self.params["max_expand_px"])
 

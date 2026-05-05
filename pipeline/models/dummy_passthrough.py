@@ -1,3 +1,5 @@
+"""Dummy passthrough model — returns a constant mask; useful for pipeline smoke-tests."""
+
 import numpy as np
 from core.base import MattingModel
 from core.parameters import ParameterSpec
@@ -11,6 +13,7 @@ class DummyPassthrough(MattingModel):
 
     @classmethod
     def parameter_specs(cls):
+        """Return the list of tunable parameters for this component."""
         return [
             ParameterSpec(
                 name="mask_value",
@@ -25,6 +28,7 @@ class DummyPassthrough(MattingModel):
         ]
 
     def load(self, weights_path=None):
+        """No weights to load — this model generates constant masks."""
         pass  # No weights to load.
 
     def infer(self, frame):

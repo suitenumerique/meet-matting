@@ -22,6 +22,7 @@ class PersonZoom(Preprocessor):
     description = "Zoom sur les personnes détectées pour une segmentation haute résolution."
 
     def __init__(self, **params):
+        """Initialise with params and instantiate all detector backends."""
         super().__init__(**params)
         self.detector = PersonDetector()
         self.pose_detector = PoseDetector()
@@ -33,6 +34,7 @@ class PersonZoom(Preprocessor):
 
     @classmethod
     def parameter_specs(cls):
+        """Return the list of tunable parameters for this component."""
         return [
             ParameterSpec(
                 name="detection_mode",
@@ -97,11 +99,24 @@ class PersonZoom(Preprocessor):
         ]
 
     def reset(self):
+        """Clear detection state and smoothed box history."""
         self.last_bboxes = []
         self._smoothed_state = []
         self.frame_count = 0
 
     def __call__(self, frame: np.ndarray) -> np.ndarray:
+        """Detect persons, populate shared context with bounding boxes, and return *frame* unchanged.
+
+        Detection runs every ``update_interval`` frames to save CPU. Boxes are
+        smoothed with asymmetric EMA and size hysteresis, then written to
+        ``context["person_bboxes"]`` for the model and zoom_masking postprocessor to use.
+
+        Args:
+            frame: RGB image, shape (H, W, 3), dtype uint8.
+
+        Returns:
+            The same *frame* array, unmodified.
+        """
         # Signal to the pipeline that zoom is active
         context.set_val("person_zoom_active", True)
 

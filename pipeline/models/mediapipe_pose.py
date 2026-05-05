@@ -1,3 +1,5 @@
+"""MediaPipe Pose Lite model — produces a limb-skeleton float32 mask used by the trimap postprocessor."""
+
 from __future__ import annotations
 
 import logging
@@ -38,11 +40,13 @@ class MediapipePose(MattingModel):
     description = "MediaPipe Pose Lite - Détecte les membres (utile pour le post-traitement)."
 
     def __init__(self, **params):
+        """Initialise with params and allocate internal buffers."""
         super().__init__(**params)
         self._landmarker = None
 
     @classmethod
     def parameter_specs(cls):
+        """Return the list of tunable parameters for this component."""
         return [
             ParameterSpec(
                 name="thickness",
@@ -65,6 +69,7 @@ class MediapipePose(MattingModel):
         ]
 
     def load(self, weights_path: str | None = None):
+        """Download weights if needed and initialise the inference session."""
         import mediapipe as mp
         from mediapipe.tasks.python import BaseOptions
         from mediapipe.tasks.python.vision import PoseLandmarker, PoseLandmarkerOptions
@@ -85,6 +90,14 @@ class MediapipePose(MattingModel):
         self._mp = mp
 
     def infer(self, frame: np.ndarray) -> np.ndarray:
+        """Return a float32 limb-skeleton mask for *frame*.
+
+        Args:
+            frame: RGB image, shape (H, W, 3), dtype uint8.
+
+        Returns:
+            Alpha matte, shape (H, W), dtype float32, values in [0, 1].
+        """
         if self._landmarker is None:
             self.load()
 
@@ -112,6 +125,7 @@ class MediapipePose(MattingModel):
         return mask.astype(np.float32) / 255.0
 
     def cleanup(self):
+        """Close the pose landmarker and release resources."""
         if self._landmarker:
             self._landmarker.close()
             self._landmarker = None

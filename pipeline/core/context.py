@@ -15,6 +15,7 @@ class SharedContext:
     _data: dict[str, Any] = {}
 
     def __new__(cls):
+        """Return the singleton instance, creating it on first call."""
         if cls._instance is None:
             cls._instance = super().__new__(cls)
             import random
@@ -24,12 +25,15 @@ class SharedContext:
         return cls._instance
 
     def set_val(self, key: str, value: Any) -> None:
+        """Store *value* under *key* in the shared data dict."""
         self._data[key] = value
 
     def get_val(self, key: str, default: Any = None) -> Any:
+        """Return the value stored under *key*, or *default* if absent."""
         return self._data.get(key, default)
 
     def clear(self):
+        """Clear all stored values; called once per frame by the pipeline."""
         self._data.clear()
 
 
@@ -38,12 +42,15 @@ _ctx = SharedContext()
 
 
 def set_val(key, value):
+    """Store *value* under *key* in the per-frame shared context."""
     _ctx.set_val(key, value)
 
 
 def get_val(key, default=None):
+    """Return the value stored under *key*, or *default* if absent."""
     return _ctx.get_val(key, default)
 
 
 def clear():
+    """Clear all per-frame context values."""
     _ctx.clear()

@@ -1,3 +1,5 @@
+"""Boundary blur postprocessor — softens jagged mask edges with a Gaussian applied only to transition zones."""
+
 import cv2
 import numpy as np
 from core.base import Postprocessor
@@ -17,6 +19,7 @@ class BoundaryBlur(Postprocessor):
 
     @classmethod
     def parameter_specs(cls) -> list[ParameterSpec]:
+        """Return the list of tunable parameters for this component."""
         return [
             ParameterSpec(
                 name="sigma",
@@ -51,9 +54,19 @@ class BoundaryBlur(Postprocessor):
         ]
 
     def reset(self) -> None:
+        """No temporal state to clear."""
         pass
 
     def __call__(self, mask: np.ndarray, original_frame: np.ndarray) -> np.ndarray:
+        """Apply Gaussian blur only to the mask boundary zone.
+
+        Args:
+            mask:           Alpha matte, shape (H, W), dtype float32, range [0, 1].
+            original_frame: Original RGB frame, shape (H, W, 3), dtype uint8 (unused).
+
+        Returns:
+            Refined alpha matte with softened edges, shape (H, W), dtype float32.
+        """
         if self.params["sigma"] <= 0.1:
             return mask
 

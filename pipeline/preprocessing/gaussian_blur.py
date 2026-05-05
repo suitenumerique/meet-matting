@@ -1,3 +1,5 @@
+"""Gaussian blur preprocessor — softens the frame to reduce high-frequency noise before inference."""
+
 import cv2
 from core.base import Preprocessor
 from core.parameters import ParameterSpec
@@ -11,6 +13,7 @@ class GaussianBlur(Preprocessor):
 
     @classmethod
     def parameter_specs(cls):
+        """Return the list of tunable parameters for this component."""
         return [
             ParameterSpec(
                 name="kernel_size",

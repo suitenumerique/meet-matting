@@ -63,6 +63,7 @@ class OpticalFlowWarp(Postprocessor):
     )
 
     def __init__(self, **params) -> None:
+        """Initialise with params and pre-allocate the DIS optical flow engine."""
         super().__init__(**params)
         self._dis = cv2.DISOpticalFlow.create(cv2.DISOPTICAL_FLOW_PRESET_ULTRAFAST)
         self._prev_gray: np.ndarray | None = None
@@ -74,6 +75,7 @@ class OpticalFlowWarp(Postprocessor):
 
     @classmethod
     def parameter_specs(cls) -> list[ParameterSpec]:
+        """Return the list of tunable parameters for this component."""
         return [
             ParameterSpec(
                 name="alpha_min",
@@ -116,6 +118,7 @@ class OpticalFlowWarp(Postprocessor):
         ]
 
     def reset(self) -> None:
+        """Clear temporal state so the filter re-initialises on the next frame."""
         self._prev_gray = None
         self._prev_mask = None
 
@@ -127,6 +130,15 @@ class OpticalFlowWarp(Postprocessor):
         self._grid_shape = (h, w)
 
     def __call__(self, mask: np.ndarray, original_frame: np.ndarray) -> np.ndarray:
+        """Warp previous mask to the current frame with DIS flow, then blend with *mask*.
+
+        Args:
+            mask:           Raw alpha matte for the current frame, shape (H, W), float32, [0, 1].
+            original_frame: Original RGB frame (used for flow computation), shape (H, W, 3), uint8.
+
+        Returns:
+            Temporally stabilised mask, shape (H, W), dtype float32, range [0, 1].
+        """
         alpha_min = float(self.params["alpha_min"])
         adaptive = bool(self.params["adaptive"])
         gamma = float(self.params["gamma"])

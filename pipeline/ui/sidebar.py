@@ -1,3 +1,5 @@
+"""Streamlit sidebar: component selection, parameter widgets, and the SidebarSelection dataclass."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field

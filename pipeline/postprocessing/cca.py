@@ -27,6 +27,7 @@ class ConnectedComponents(Postprocessor):
 
     @classmethod
     def parameter_specs(cls):
+        """Return the list of tunable parameters for this component."""
         return [
             ParameterSpec(
                 name="top_n",
@@ -58,9 +59,19 @@ class ConnectedComponents(Postprocessor):
         ]
 
     def reset(self):
+        """No temporal state to clear."""
         pass
 
     def __call__(self, mask: np.ndarray, original_frame: np.ndarray) -> np.ndarray:
+        """Zero out small or excess connected components, keeping only the top-N largest blobs.
+
+        Args:
+            mask:           Alpha matte, shape (H, W), dtype float32, range [0, 1].
+            original_frame: Original RGB frame, shape (H, W, 3), dtype uint8 (unused).
+
+        Returns:
+            Refined alpha matte, shape (H, W), dtype float32, range [0, 1].
+        """
         # Fast exit: completely empty mask
         if not np.any(mask > 0.0):
             return mask

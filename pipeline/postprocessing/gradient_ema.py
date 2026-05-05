@@ -64,11 +64,13 @@ class GradientEMA(Postprocessor):
     )
 
     def __init__(self, **params) -> None:
+        """Initialise with params and allocate internal buffers."""
         super().__init__(**params)
         self._prev_mask: np.ndarray | None = None
 
     @classmethod
     def parameter_specs(cls) -> list[ParameterSpec]:
+        """Return the list of tunable parameters for this component."""
         return [
             ParameterSpec(
                 name="w_min",
@@ -99,6 +101,7 @@ class GradientEMA(Postprocessor):
         ]
 
     def reset(self) -> None:
+        """Clear internal state; called by the pipeline between videos."""
         self._prev_mask = None
 
     # ------------------------------------------------------------------

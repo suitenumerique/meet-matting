@@ -26,6 +26,7 @@ class MediapipeSelfieMulticlass(MattingModel):
     description = "MediaPipe Selfie Multiclass Segmenter (Background, Hair, Body, Clothes, Skin)."
 
     def __init__(self, **params):
+        """Initialise with params and allocate internal buffers."""
         super().__init__(**params)
         self._segmenter = None
 
@@ -35,6 +36,7 @@ class MediapipeSelfieMulticlass(MattingModel):
 
     @classmethod
     def parameter_specs(cls):
+        """Return the list of tunable parameters for this component."""
         return [
             ParameterSpec(
                 name="gpu",
@@ -81,6 +83,7 @@ class MediapipeSelfieMulticlass(MattingModel):
         ]
 
     def load(self, weights_path: str | None = None):
+        """Download weights if needed and initialise the inference session."""
         # Resolve absolute path to the model file
         if weights_path:
             path = weights_path

@@ -1,3 +1,5 @@
+"""Morphology postprocessor — closing + opening to fill holes and remove isolated noise blobs."""
+
 import cv2
 import numpy as np
 from core.base import Postprocessor
@@ -32,6 +34,7 @@ class MorphologyCleanup(Postprocessor):
 
     @classmethod
     def parameter_specs(cls) -> list[ParameterSpec]:
+        """Return the list of tunable parameters for this component."""
         return [
             ParameterSpec(
                 name="close_size",
@@ -82,9 +85,19 @@ class MorphologyCleanup(Postprocessor):
         ]
 
     def reset(self) -> None:
+        """No temporal state to clear."""
         pass
 
     def __call__(self, mask: np.ndarray, original_frame: np.ndarray) -> np.ndarray:
+        """Apply closing then opening (or the reverse) to *mask*.
+
+        Args:
+            mask:           Alpha matte, shape (H, W), dtype float32, range [0, 1].
+            original_frame: Original RGB frame, shape (H, W, 3), dtype uint8 (unused).
+
+        Returns:
+            Morphologically cleaned mask, shape (H, W), dtype float32, range [0, 1].
+        """
         close_size = int(self.params["close_size"])
         open_size = int(self.params["open_size"])
         shape = self.params["kernel_shape"]
@@ -98,10 +111,12 @@ class MorphologyCleanup(Postprocessor):
         m_u8 = (mask * 255.0).astype(np.uint8)
 
         def close_op(img: np.ndarray) -> np.ndarray:
+            """Apply morphological closing (dilation then erosion) to fill internal holes."""
             k = _make_kernel(close_size, shape)
             return cv2.morphologyEx(img, cv2.MORPH_CLOSE, k, iterations=iters)
 
         def open_op(img: np.ndarray) -> np.ndarray:
+            """Apply morphological opening (erosion then dilation) to remove peripheral noise."""
             k = _make_kernel(open_size, shape)
             return cv2.morphologyEx(img, cv2.MORPH_OPEN, k, iterations=iters)
 

@@ -1,3 +1,5 @@
+"""Streamlit application entry point for the Matting Pipeline Lab."""
+
 import os
 
 os.environ["OPENCV_AVFOUNDATION_SKIP_AUTH"] = "0"
@@ -31,6 +33,7 @@ from ui.video_panel import display_four_panels
 
 @st.cache_resource
 def _load_bg_image(name: str) -> np.ndarray | None:
+    """Download and cache a background image by name; returns an RGB uint8 array or None on failure."""
     url = _BG_IMAGE_URLS.get(name)
     if url is None:
         return None
@@ -142,7 +145,7 @@ with col_download:
         data=config_json,
         file_name=f"config_{selection.model_name.lower().replace(' ', '_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
         mime="application/json",
-        use_container_width=True,
+        width="stretch",
         key="global_export_config",
     )
 
@@ -225,7 +228,7 @@ with tab_lab:
 
     col_btn, col_info = st.columns([1, 3])
     with col_btn:
-        run_clicked = st.button("Process & save", type="primary", use_container_width=True)
+        run_clicked = st.button("Process & save", type="primary", width="stretch")
     with col_info:
         frames_to_process = (total + skip_frames - 1) // skip_frames
         strategy_name = selection.skip_strategy[0]
@@ -259,6 +262,7 @@ with tab_lab:
         status = st.empty()
 
         def _on_progress(done, total_f, current_fps):
+            """Update the Streamlit progress bar and FPS status caption."""
             progress_bar.progress(done / max(total_f, 1))
             status.caption(f"Frame {done} / {total_f} | {current_fps:.1f} FPS")
 
@@ -411,7 +415,7 @@ with tab_live:
                             ph_final.image(
                                 rgb_disp,
                                 channels="RGB",
-                                use_container_width=True,
+                                width="stretch",
                                 output_format="JPEG",
                             )
                             prev_frame_rgb = rgb_full
@@ -442,14 +446,14 @@ with tab_live:
                         ph_orig.image(
                             rgb_disp,
                             caption="Original",
-                            use_container_width=True,
+                            width="stretch",
                             output_format="JPEG",
                         )
                         ph_final.image(
                             final,
                             channels="RGB",
                             caption="Composite",
-                            use_container_width=True,
+                            width="stretch",
                             output_format="JPEG",
                         )
                         raw_uint8 = (cv2.resize(result["raw_mask"], (DISP_W, disp_h)) * 255).astype(
@@ -458,20 +462,18 @@ with tab_live:
                         ph_raw.image(
                             raw_uint8,
                             caption="Masque brut",
-                            use_container_width=True,
+                            width="stretch",
                             output_format="JPEG",
                         )
                         fin_uint8 = (final_mask * 255).astype(np.uint8)
                         ph_fin_mask.image(
                             fin_uint8,
                             caption="Masque final (post-proc)",
-                            use_container_width=True,
+                            width="stretch",
                             output_format="JPEG",
                         )
                     else:
-                        ph_final.image(
-                            final, channels="RGB", use_container_width=True, output_format="JPEG"
-                        )
+                        ph_final.image(final, channels="RGB", width="stretch", output_format="JPEG")
 
                     fps_history.append(time.time() - loop_start)
                     if len(fps_history) > 30:

@@ -1,3 +1,5 @@
+"""PP-HumanSeg V2 pipeline model wrapper — lightweight ONNX-based human segmenter at 192×192."""
+
 import logging
 import urllib.request
 from pathlib import Path
@@ -31,9 +33,11 @@ class PPHumanSegV2(MattingModel):
 
     @classmethod
     def parameter_specs(cls):
+        """Return the list of tunable parameters for this component."""
         return []
 
     def load(self, weights_path=None):
+        """Download weights if needed and initialise the inference session."""
         try:
             import onnxruntime as ort
         except ImportError as e:

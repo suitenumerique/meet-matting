@@ -1,3 +1,5 @@
+"""CLAHE preprocessor — contrast-limited adaptive histogram equalisation on the luminance channel."""
+
 import cv2
 import numpy as np
 from core.base import Preprocessor
@@ -12,6 +14,7 @@ class CLAHE(Preprocessor):
 
     @classmethod
     def parameter_specs(cls):
+        """Return the list of tunable parameters for this component."""
         return [
             ParameterSpec(
                 name="clip_limit",

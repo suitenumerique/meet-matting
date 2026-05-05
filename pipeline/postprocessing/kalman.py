@@ -28,6 +28,7 @@ class KalmanMask(Postprocessor):
     )
 
     def __init__(self, **params):
+        """Initialise with params and allocate internal buffers."""
         super().__init__(**params)
         # State estimates -- all (H, W) float32.
         self._p: np.ndarray | None = None  # probability estimate
@@ -39,6 +40,7 @@ class KalmanMask(Postprocessor):
 
     @classmethod
     def parameter_specs(cls):
+        """Return the list of tunable parameters for this component."""
         return [
             ParameterSpec(
                 name="q_pos",
@@ -75,6 +77,7 @@ class KalmanMask(Postprocessor):
         ]
 
     def reset(self):
+        """Clear all per-pixel state so the filter re-initialises on the next frame."""
         self._p = None
         self._v = None
         self._P00 = None
@@ -82,6 +85,15 @@ class KalmanMask(Postprocessor):
         self._P11 = None
 
     def __call__(self, mask: np.ndarray, original_frame: np.ndarray) -> np.ndarray:
+        """Run one Kalman predict-update step on *mask*.
+
+        Args:
+            mask:           Alpha matte, shape (H, W), dtype float32, range [0, 1].
+            original_frame: Original RGB frame, shape (H, W, 3), dtype uint8 (unused).
+
+        Returns:
+            Filtered mask, shape (H, W), dtype float32, range [0, 1].
+        """
         q_pos = self.params["q_pos"]
         q_vel = self.params["q_vel"]
         r_mes = self.params["r_mes"]

@@ -45,6 +45,7 @@ class TemporalPersistence(Postprocessor):
     )
 
     def __init__(self, **params) -> None:
+        """Initialise with params and allocate per-pixel state, confirm, and age arrays."""
         super().__init__(**params)
         # Per-pixel state: True = VISIBLE, False = HIDDEN.
         self._state: np.ndarray | None = None
@@ -55,6 +56,7 @@ class TemporalPersistence(Postprocessor):
 
     @classmethod
     def parameter_specs(cls) -> list[ParameterSpec]:
+        """Return the list of tunable parameters for this component."""
         return [
             ParameterSpec(
                 name="threshold",
@@ -98,6 +100,7 @@ class TemporalPersistence(Postprocessor):
         ]
 
     def reset(self) -> None:
+        """Clear all per-pixel state so the filter re-initialises on the next frame."""
         self._state = None
         self._confirm_count = None
         self._age_count = None
@@ -109,6 +112,15 @@ class TemporalPersistence(Postprocessor):
         self._age_count = np.zeros(mask.shape, dtype=np.int32)
 
     def __call__(self, mask: np.ndarray, original_frame: np.ndarray) -> np.ndarray:
+        """Apply one step of the DeepSORT-style state machine to every pixel of *mask*.
+
+        Args:
+            mask:           Alpha matte, shape (H, W), dtype float32, range [0, 1].
+            original_frame: Original RGB frame, shape (H, W, 3), dtype uint8 (unused).
+
+        Returns:
+            Binary mask, shape (H, W), dtype float32, values in {0.0, 1.0}.
+        """
         threshold = float(self.params["threshold"])
         n_confirm = int(self.params["n_confirm"])
         max_age = int(self.params["max_age"])

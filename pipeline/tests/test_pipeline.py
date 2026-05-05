@@ -1,3 +1,5 @@
+"""Integration tests for MattingPipeline.process_frame — shapes, dtypes, and end-to-end behaviour."""
+
 import numpy as np
 from core.pipeline import MattingPipeline
 from core.registry import models, postprocessors, preprocessors
@@ -25,6 +27,7 @@ def _build(model_params=None, post_names=None, post_params_list=None):
 
 
 def test_basic_shapes_and_dtypes():
+    """process_frame result dict must contain all expected keys with correct shapes and dtypes."""
     frame = _make_frame()
     pipeline = _build()
     result = pipeline.process_frame(frame)
@@ -40,6 +43,7 @@ def test_basic_shapes_and_dtypes():
 
 
 def test_identity_pre_leaves_frame_equal():
+    """With identity preprocessor, original and preprocessed frames must be pixel-identical."""
     frame = _make_frame()
     pipeline = _build()
     result = pipeline.process_frame(frame)
@@ -47,6 +51,7 @@ def test_identity_pre_leaves_frame_equal():
 
 
 def test_mask_value_one_final_equals_original():
+    """A mask of all-ones means the composite must equal the original frame."""
     frame = _make_frame()
     pipeline = _build(model_params={"mask_value": 1.0})
     result = pipeline.process_frame(frame)
@@ -54,6 +59,7 @@ def test_mask_value_one_final_equals_original():
 
 
 def test_mask_value_zero_final_is_zeros():
+    """A mask of all-zeros means the composite must be a black frame (pure background)."""
     frame = _make_frame()
     pipeline = _build(model_params={"mask_value": 0.0})
     result = pipeline.process_frame(frame)
@@ -61,6 +67,7 @@ def test_mask_value_zero_final_is_zeros():
 
 
 def test_threshold_above_cutoff_gives_all_ones():
+    """Threshold postprocessor must output all-ones when mask_value > cutoff."""
     frame = _make_frame()
     pipeline = _build(
         model_params={"mask_value": 0.6},
@@ -72,6 +79,7 @@ def test_threshold_above_cutoff_gives_all_ones():
 
 
 def test_threshold_below_cutoff_gives_all_zeros():
+    """Threshold postprocessor must output all-zeros when mask_value < cutoff."""
     frame = _make_frame()
     pipeline = _build(
         model_params={"mask_value": 0.4},

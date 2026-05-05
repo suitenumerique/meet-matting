@@ -1,3 +1,5 @@
+"""Reusable Streamlit widgets that map ParameterSpec objects to the appropriate input controls."""
+
 import streamlit as st
 from core.parameters import ParameterSpec
 

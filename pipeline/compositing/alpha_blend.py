@@ -1,3 +1,5 @@
+"""Alpha blend compositor — standard over-operator: FG·α + BG·(1−α)."""
+
 import numpy as np
 from core.base import Compositor
 from core.registry import compositors
@@ -10,9 +12,20 @@ class AlphaBlend(Compositor):
 
     @classmethod
     def parameter_specs(cls):
+        """Return the list of tunable parameters for this component."""
         return []
 
     def composite(self, fg: np.ndarray, bg: np.ndarray, alpha: np.ndarray) -> np.ndarray:
+        """Composite *fg* over *bg* using *alpha* via the standard lerp formula.
+
+        Args:
+            fg:    Foreground RGB frame, shape (H, W, 3), dtype uint8.
+            bg:    Background, shape (H, W, 3), dtype float32, range [0, 255].
+            alpha: Alpha matte, shape (H, W), dtype float32, range [0, 1].
+
+        Returns:
+            Composited image, shape (H, W, 3), dtype uint8.
+        """
         # Lerp formula: bg + (fg - bg) * alpha
         # All in-place on fg_f to avoid extra allocations.
         # fg is uint8 → explicit float32 cast prevents numpy from upcasting to float64.

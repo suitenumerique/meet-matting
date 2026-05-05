@@ -1,3 +1,5 @@
+"""Sigmoid postprocessor — sharpens soft mask edges by remapping probabilities through a sigmoid."""
+
 import numpy as np
 from core.base import Postprocessor
 from core.parameters import ParameterSpec
@@ -11,6 +13,7 @@ class Sigmoid(Postprocessor):
 
     @classmethod
     def parameter_specs(cls):
+        """Return the list of tunable parameters for this component."""
         return [
             ParameterSpec(
                 name="gain",

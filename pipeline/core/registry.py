@@ -1,3 +1,5 @@
+"""Component registry: decorator-based auto-registration and discovery for pipeline components."""
+
 from __future__ import annotations
 
 import importlib
@@ -9,6 +11,7 @@ class Registry:
     """Auto-discovery registry for pipeline components."""
 
     def __init__(self, label: str):
+        """Initialise an empty registry with a human-readable *label* for error messages."""
         self._label = label
         self._store: dict[str, type[Any]] = {}
 

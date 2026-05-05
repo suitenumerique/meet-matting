@@ -37,6 +37,7 @@ class LightWrap(Compositor):
 
     @classmethod
     def parameter_specs(cls):
+        """Return the list of tunable parameters for this component."""
         return [
             ParameterSpec(
                 name="amount",
@@ -74,6 +75,16 @@ class LightWrap(Compositor):
         ]
 
     def composite(self, fg: np.ndarray, bg: np.ndarray, alpha: np.ndarray) -> np.ndarray:
+        """Composite *fg* over *bg* with a light-wrap edge glow from the background.
+
+        Args:
+            fg:    Foreground RGB frame, shape (H, W, 3), dtype uint8.
+            bg:    Background, shape (H, W, 3), dtype float32, range [0, 255].
+            alpha: Alpha matte, shape (H, W), dtype float32, range [0, 1].
+
+        Returns:
+            Composited image with background light bleeding onto subject edges, dtype uint8.
+        """
         h, w = fg.shape[:2]
         amount = float(self.params["amount"])
         blur_size = int(self.params["blur_size"]) | 1  # garantit impair

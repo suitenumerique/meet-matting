@@ -1,3 +1,5 @@
+"""Erosion postprocessor — shrinks the mask by a configurable radius to tighten edges."""
+
 import cv2
 import numpy as np
 from core.base import Postprocessor
@@ -12,6 +14,7 @@ class Erosion(Postprocessor):
 
     @classmethod
     def parameter_specs(cls):
+        """Return the list of tunable parameters for this component."""
         return [
             ParameterSpec(
                 name="radius",
@@ -26,9 +29,19 @@ class Erosion(Postprocessor):
         ]
 
     def reset(self):
+        """No temporal state to clear."""
         pass
 
     def __call__(self, mask: np.ndarray, original_frame: np.ndarray) -> np.ndarray:
+        """Erode *mask* by *radius* pixels to tighten foreground edges.
+
+        Args:
+            mask:           Alpha matte, shape (H, W), dtype float32, range [0, 1].
+            original_frame: Original RGB frame, shape (H, W, 3), dtype uint8 (unused).
+
+        Returns:
+            Eroded alpha matte, shape (H, W), dtype float32, range [0, 1].
+        """
         radius = int(self.params["radius"])
         size = 2 * radius + 1
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (size, size))

@@ -23,6 +23,7 @@ class MattingPipeline:
         bg_color: tuple[int, int, int] = (0, 0, 0),
         bg_image: np.ndarray | None = None,
     ):
+        """Initialise with params and allocate internal buffers."""
         self.preprocessors = preprocessors
         self.model = model
         self.postprocessors = postprocessors

@@ -1,3 +1,5 @@
+"""Abstract base classes that define the data contracts for every pipeline component."""
+
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
@@ -140,7 +142,18 @@ class SkipStrategy(Component, ABC):
         current_frame: np.ndarray,
         prev_frame: np.ndarray,
         prev_mask: np.ndarray,
-    ) -> np.ndarray: ...
+    ) -> np.ndarray:
+        """Produce a mask for *current_frame* without running the model.
+
+        Args:
+            current_frame: RGB frame to fill, shape (H, W, 3), dtype uint8.
+            prev_frame:    Last frame that was actually inferred, shape (H, W, 3), dtype uint8.
+            prev_mask:     Mask from the last inferred frame, shape (H, W), dtype float32, [0, 1].
+
+        Returns:
+            Estimated mask for *current_frame*, shape (H, W), dtype float32, [0, 1].
+        """
+        ...
 
 
 class Compositor(Component, ABC):
