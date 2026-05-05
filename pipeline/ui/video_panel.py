@@ -30,18 +30,18 @@ def display_four_panels(result: dict) -> None:
     col1, col2 = st.columns(2)
 
     with col1:
-        st.image(result["original"], caption="Original (image complète)", use_container_width=True)
+        st.image(result["original"], caption="Original (image complète)", width="stretch")
 
     with col2:
-        st.image(result["final"], caption="Après post-processing (composite)", use_container_width=True)
+        st.image(result["final"], caption="Après post-processing (composite)", width="stretch")
 
     # ── Row 2 : masques pour comparaison ─────────────────────────────────────
     col3, col4 = st.columns(2)
 
     with col3:
         raw_uint8 = (result["raw_mask"] * 255).astype(np.uint8)
-        st.image(raw_uint8, caption="Masque brut (avant post-processing)", use_container_width=True)
+        st.image(raw_uint8, caption="Masque brut (avant post-processing)", width="stretch")
 
     with col4:
         final_uint8 = (result["final_mask"] * 255).astype(np.uint8)
-        st.image(final_uint8, caption="Masque final (après post-processing)", use_container_width=True)
+        st.image(final_uint8, caption="Masque final (après post-processing)", width="stretch")

@@ -2,6 +2,7 @@ import os
 os.environ["OPENCV_AVFOUNDATION_SKIP_AUTH"] = "0"
 
 import time
+import collections
 import hashlib
 import json
 import time
@@ -119,7 +120,7 @@ with col_download:
         data=config_json,
         file_name=f"config_{selection.model_name.lower().replace(' ', '_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
         mime="application/json",
-        use_container_width=True,
+        width="stretch",
         key="global_export_config"
     )
 
@@ -192,7 +193,7 @@ with tab_lab:
 
     col_btn, col_info = st.columns([1, 3])
     with col_btn:
-        run_clicked = st.button("Process & save", type="primary", use_container_width=True)
+        run_clicked = st.button("Process & save", type="primary", width="stretch")
     with col_info:
         frames_to_process = (total + skip_frames - 1) // skip_frames
         strategy_name = selection.skip_strategy[0]
@@ -360,8 +361,9 @@ with tab_live:
                 DISP_W = 640
                 idx = 0
                 last_result: dict | None = None
-                fps_history: list[float] = []
                 inf_history: list[float] = []
+                # Mesure précise du Throughput (FPS réel à l'affichage)
+                delivery_timestamps = collections.deque(maxlen=30)
 
                 # Inject the first frame we already read above
                 frames_to_process = [bgr_test]
@@ -393,9 +395,9 @@ with tab_live:
                         except Exception as exc:
                             cam_status.error(f"⚠️ Erreur pipeline : {exc}")
                             # Show raw frame so the user sees something
-                            ph_final.image(rgb_disp, channels="RGB", use_container_width=True, output_format="JPEG")
+                            ph_final.image(rgb_disp, channels="RGB", width="stretch", output_format="JPEG")
                             idx += 1
-                            fps_history.append(time.time() - loop_start)
+                            delivery_timestamps.append(time.time())
                             continue
 
                     result = last_result
@@ -420,36 +422,41 @@ with tab_live:
                     if show_panels:
                         # On affiche la version "preprocessed" (avec les bboxes du Person Zoom)
                         pre_disp = cv2.resize(result["preprocessed"], (DISP_W, disp_h))
-                        ph_orig.image(pre_disp, caption="Pre-processing (BBoxes)", use_container_width=True, output_format="JPEG")
+                        ph_orig.image(pre_disp, caption="Pre-processing (BBoxes)", width="stretch", output_format="JPEG")
                         
-                        ph_final.image(final, channels="RGB", caption="Composite", use_container_width=True, output_format="JPEG")
+                        ph_final.image(final, channels="RGB", caption="Composite", width="stretch", output_format="JPEG")
                         
                         raw_uint8 = (cv2.resize(result["raw_mask"], (DISP_W, disp_h)) * 255).astype(np.uint8)
-                        ph_raw.image(raw_uint8, caption="Masque brut", use_container_width=True, output_format="JPEG")
+                        ph_raw.image(raw_uint8, caption="Masque brut", width="stretch", output_format="JPEG")
                         
                         fin_uint8 = (final_mask * 255).astype(np.uint8)
-                        ph_fin_mask.image(fin_uint8, caption="Masque final (post-proc)", use_container_width=True, output_format="JPEG")
+                        ph_fin_mask.image(fin_uint8, caption="Masque final (post-proc)", width="stretch", output_format="JPEG")
                     else:
-                        ph_final.image(final, channels="RGB", use_container_width=True, output_format="JPEG")
+                        ph_final.image(final, channels="RGB", width="stretch", output_format="JPEG")
 
-                    fps_history.append(time.time() - loop_start)
-                    if len(fps_history) > 30:
-                        fps_history.pop(0)
+                    # Track delivery timestamp for precise FPS (Throughput)
+                    delivery_timestamps.append(time.time())
 
                     idx += 1
                     if idx % 5 == 0:
-                        avg_loop = sum(fps_history) / len(fps_history)
                         avg_inf = sum(inf_history) / len(inf_history) if inf_history else 0
                         model_fps = 1.0 / avg_inf if avg_inf > 0 else 0
                         
+                        # Calcul du FPS réel (Throughput) sur la fenêtre glissante
+                        if len(delivery_timestamps) > 1:
+                            real_fps = (len(delivery_timestamps) - 1) / (delivery_timestamps[-1] - delivery_timestamps[0])
+                        else:
+                            real_fps = 0.0
+                            
                         # Affichage prioritaire pour le benchmark de production
-                        inf_placeholder.metric("FPS Modèle (Brut)", f"{model_fps:.1f}")
+                        inf_placeholder.metric("FPS Réel (Display)", f"{real_fps:.1f}")
                         fps_placeholder.metric("Latence Inférence", f"{avg_inf * 1000:.0f} ms")
                         
+                        avg_loop = 1.0 / real_fps if real_fps > 0 else 0
                         st_debug.caption(
                             f"Frame {idx} | "
-                            f"Pipeline IA : {avg_inf*1000:.1f}ms ({model_fps:.1f} FPS) | "
-                            f"Overhead Streamlit : {(avg_loop - avg_inf)*1000:.1f}ms"
+                            f"Pipeline IA : {avg_inf*1000:.1f}ms ({model_fps:.1f} FPS théorique) | "
+                            f"Overhead Streamlit : {max(0, (avg_loop - avg_inf)*1000):.1f}ms"
                         )
 
                         # Affichage du profiling détaillé sous forme de tableau
