@@ -322,6 +322,8 @@ with tab_live:
     col_ctrl, col_stats = st.columns([3, 1])
     with col_ctrl:
         show_panels = st.checkbox("Vue 4 panneaux", value=False)
+        live_skip = st.slider("Saut de frames (IA)", 1, 10, 1, help="Traiter seulement 1 frame sur N pour booster les FPS réels.")
+        bg_mode = st.selectbox("Fond Caméra", ["Couleur sidebar", "Noir", "Flou (Portrait)", "Bureau Moderne", "Nature"])
     with col_stats:
         fps_placeholder = st.empty()
         inf_placeholder = st.empty()
@@ -548,29 +550,16 @@ with tab_live:
                         # Crucial: give a tiny bit of time for Streamlit's event loop
                         time.sleep(0.001)
 
+                        # Secondary placeholders (on-screen stats)
                         inf_placeholder.metric("FPS Réel (Display)", f"{real_fps:.1f}")
                         fps_placeholder.metric("Latence Inférence", f"{avg_inf * 1000:.0f} ms")
                             
                         avg_loop = 1.0 / real_fps if real_fps > 0 else 0
                         st_debug.caption(
-                                f"Frame {idx} | "
+                                f"Frame {data.get('idx', 0)} | "
                                 f"Pipeline IA : {avg_inf*1000:.1f}ms ({model_fps:.1f} FPS th.) | "
                                 f"Overhead Streamlit : {max(0, (avg_loop - avg_inf)*1000):.1f}ms"
                             )
-
-                        if "timings" in result:
-                                t = result["timings"]
-                                table_md = "| Composant | Latence (ms) |\n| :--- | :--- |\n"
-                                for k, v in t.items():
-                                    if k.startswith("pre_"): table_md += f"| 🟢 Pre: {k[4:]} | {v*1000:.2f} |\n"
-                                table_md += f"| 🧠 **Inférence IA** | **{t.get('model_inference', 0)*1000:.2f}** |\n"
-                                table_md += f"| ⬆️ **Upsampling** | **{t.get('upsampling', 0)*1000:.2f}** |\n"
-                                for k, v in t.items():
-                                    if k.startswith("post_"): table_md += f"| 🔵 Post: {k[5:]} | {v*1000:.2f} |\n"
-                                table_md += f"| 🎬 Composition | {t.get('compositing', 0)*1000:.2f} |\n"
-                                table_md += f"| --- | --- |\n"
-                                table_md += f"| ⏱️ **TOTAL PIPELINE** | **{t.get('total_pipeline', 0)*1000:.2f}** |"
-                                ph_profiling.markdown(table_md)
 
                 finally:
                     # Clean shutdown
