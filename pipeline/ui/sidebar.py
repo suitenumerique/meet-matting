@@ -10,6 +10,11 @@ from core.video_io import list_videos
 
 from ui.widgets import render_component_config
 
+_BG_IMAGE_URLS: dict[str, str] = {
+    "Bureau Moderne": "https://images.unsplash.com/photo-1497366216548-37526070297c?auto=format&fit=crop&w=1280&q=80",
+    "Nature": "https://images.unsplash.com/photo-1441974231531-c6227db76b6e?auto=format&fit=crop&w=1280&q=80",
+}
+
 
 @dataclass
 class SidebarSelection:
@@ -19,6 +24,7 @@ class SidebarSelection:
     weights_path: str | None
     upsampler: tuple[str, dict]
     bg_color: tuple[int, int, int]
+    bg_image_name: str | None
     skip_frames: int
     skip_strategy: tuple[str, dict]
     preprocessors: list[tuple[str, dict]] = field(default_factory=list)
@@ -130,12 +136,22 @@ def render_sidebar() -> SidebarSelection:
             params = render_component_config(cls, key_prefix=f"post_{i}")
             post_configs.append((name, params))
 
-    # --- 6. Background colour ---
-    with st.sidebar.expander("Background colour", expanded=False):
-        st.caption("Colour used for pixels identified as background in the final composite.")
-        hex_color = st.color_picker("Background", value="#000000", key="bg_color")
-        h = hex_color.lstrip("#")
-        bg_color: tuple[int, int, int] = (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
+    # --- 6. Background ---
+    with st.sidebar.expander("Background", expanded=False):
+        st.caption("Background used for pixels identified as background in the final composite.")
+        bg_type = st.selectbox(
+            "Type",
+            options=["Couleur unie"] + list(_BG_IMAGE_URLS.keys()),
+            key="bg_type",
+        )
+        if bg_type == "Couleur unie":
+            hex_color = st.color_picker("Colour", value="#000000", key="bg_color")
+            h = hex_color.lstrip("#")
+            bg_color: tuple[int, int, int] = (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
+            bg_image_name: str | None = None
+        else:
+            bg_color = (0, 0, 0)
+            bg_image_name = bg_type
 
     # --- 7. Skip Frames ---
     with st.sidebar.expander("Skip Frames", expanded=False):
@@ -168,9 +184,9 @@ def render_sidebar() -> SidebarSelection:
         weights_path=weights_path,
         upsampler=upsampler,
         bg_color=bg_color,
+        bg_image_name=bg_image_name,
         skip_frames=skip_frames,
         skip_strategy=skip_strategy,
         preprocessors=pre_configs,
         postprocessors=post_configs,
     )
-

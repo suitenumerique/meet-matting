@@ -1,30 +1,28 @@
 import os
+
 os.environ["OPENCV_AVFOUNDATION_SKIP_AUTH"] = "0"
 
-import time
 import collections
 import hashlib
 import json
-import threading
 import queue
+import threading
 import time
+import urllib.request
 from datetime import datetime
 from pathlib import Path
 
-import streamlit as st
+import cv2
 import numpy as np
+import streamlit as st
 from config import OUTPUT_DIR
 from core.pipeline import MattingPipeline
 from core.registry import models, postprocessors, preprocessors, skip_strategies, upsamplers
 from core.video_io import frame_count, read_frame
 from core.video_processing import process_video
-from ui.sidebar import render_sidebar
+from ui.sidebar import _BG_IMAGE_URLS, render_sidebar
 from ui.synced_player import display_synced_player
 from ui.video_panel import display_four_panels
-
-import urllib.request
-import tempfile
-import cv2
 
 # Auto-discover all plugins.
 preprocessors.discover("preprocessing")
@@ -32,6 +30,23 @@ models.discover("models")
 postprocessors.discover("postprocessing")
 upsamplers.discover("upsampling")
 skip_strategies.discover("skip_strategies")
+
+
+@st.cache_resource
+def _load_bg_image(name: str) -> np.ndarray | None:
+    """Download and cache a background image by name; returns an RGB uint8 array or None on failure."""
+    url = _BG_IMAGE_URLS.get(name)
+    if url is None:
+        return None
+    try:
+        resp = urllib.request.urlopen(url)
+        img = cv2.imdecode(np.asarray(bytearray(resp.read()), dtype="uint8"), 1)
+        if img is None:
+            return None
+        return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    except Exception:
+        return None
+
 
 st.set_page_config(layout="wide", page_title="Matting Pipeline Lab")
 
@@ -123,7 +138,7 @@ with col_download:
         file_name=f"config_{selection.model_name.lower().replace(' ', '_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
         mime="application/json",
         width="stretch",
-        key="global_export_config"
+        key="global_export_config",
     )
 
 if selection.video_path is None:
@@ -154,7 +169,10 @@ if st.session_state.get("_model_key") != _model_key:
 model = st.session_state["_model"]
 pre_components = [preprocessors.get(name)(**params) for name, params in selection.preprocessors]
 post_components = [postprocessors.get(name)(**params) for name, params in selection.postprocessors]
-pipeline = MattingPipeline(pre_components, model, post_components, bg_color=selection.bg_color)
+bg_image = _load_bg_image(selection.bg_image_name) if selection.bg_image_name else None
+pipeline = MattingPipeline(
+    pre_components, model, post_components, bg_color=selection.bg_color, bg_image=bg_image
+)
 
 # ── TABS ───────────────────────────────────────────────────────────────────────
 tab_lab, tab_live = st.tabs(["📽️ Laboratoire Vidéo", "📸 Test Caméra"])
@@ -199,7 +217,9 @@ with tab_lab:
     with col_info:
         frames_to_process = (total + skip_frames - 1) // skip_frames
         strategy_name = selection.skip_strategy[0]
-        st.caption(f"Processing **{frames_to_process} frames** (Skip: {skip_frames}, Strategy: `{strategy_name}`).")
+        st.caption(
+            f"Processing **{frames_to_process} frames** (Skip: {skip_frames}, Strategy: `{strategy_name}`)."
+        )
 
     if run_clicked:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -232,8 +252,12 @@ with tab_lab:
 
         with st.spinner("Processing video..."):
             paths = process_video(
-                pipeline, selection.video_path, run_dir, _on_progress,
-                skip_frames=skip_frames, skip_strategy=strategy_instance
+                pipeline,
+                selection.video_path,
+                run_dir,
+                _on_progress,
+                skip_frames=skip_frames,
+                skip_strategy=strategy_instance,
             )
 
         st.success(f"Saved to `{run_dir.name}`")
@@ -246,7 +270,11 @@ with tab_lab:
         if not OUTPUT_DIR.exists():
             st.info("No saved runs yet.")
         else:
-            run_dirs = sorted([d for d in OUTPUT_DIR.iterdir() if d.is_dir()], key=lambda d: d.stat().st_mtime, reverse=True)
+            run_dirs = sorted(
+                [d for d in OUTPUT_DIR.iterdir() if d.is_dir()],
+                key=lambda d: d.stat().st_mtime,
+                reverse=True,
+            )
             run_names = [d.name for d in run_dirs]
             if not run_names:
                 st.info("No saved runs yet.")
@@ -255,13 +283,14 @@ with tab_lab:
                 rd = OUTPUT_DIR / selected_run
                 conf_p = rd / "config.json"
                 if conf_p.exists():
-                    with open(conf_p) as f: st.json(json.load(f))
-                
+                    with open(conf_p) as f:
+                        st.json(json.load(f))
+
                 v_paths = {
                     "original": rd / "original.mp4",
                     "mask": rd / "mask.mp4",
                     "raw": rd / "raw.mp4",
-                    "composite": rd / "composite.mp4"
+                    "composite": rd / "composite.mp4",
                 }
                 if all(p.exists() for p in v_paths.values()):
                     display_synced_player(v_paths)
@@ -270,22 +299,7 @@ with tab_lab:
 
 with tab_live:
     st.subheader("Démo en temps réel")
-    col_ctrl, col_stats = st.columns([3, 1])
-    with col_ctrl:
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            bg_mode = st.selectbox(
-                "Arrière-plan",
-                ["Couleur sidebar", "Noir", "Flou (Portrait)", "Bureau Moderne", "Nature"],
-                index=0,
-            )
-        with c2:
-            live_skip = st.number_input("Skip Frames (Live)", min_value=1, value=1)
-        with c3:
-            show_panels = st.checkbox("Vue 4 panneaux", value=False)
-    with col_stats:
-        fps_placeholder = st.empty()
-        inf_placeholder = st.empty()
+    show_panels = st.checkbox("Vue 4 panneaux", value=False)
 
     run_cam = st.toggle("Démarrer la caméra", value=False)
     cam_status = st.empty()
@@ -336,13 +350,12 @@ with tab_live:
                     ph_final = st.empty()
 
                 ph_profiling = st.empty()
-                st_debug = st.empty()
 
                 # ── Background Worker Setup ──────────────────────────────────
                 # Use a shared dict for state and queues to survive reruns
                 if "cam_worker" not in st.session_state:
                     st.session_state.cam_worker = None
-                
+
                 # Queues: maxsize=1 ensures we always have the LATEST frame (low latency)
                 q_raw = queue.Queue(maxsize=1)
                 q_result = queue.Queue(maxsize=1)
@@ -351,119 +364,104 @@ with tab_live:
                 def capture_thread(cap, q_raw, stop_event):
                     while not stop_event.is_set():
                         ret, bgr = cap.read()
-                        if not ret: break
+                        if not ret:
+                            break
                         t_capture = time.time()
                         # Lossy: overwrite if full
                         if q_raw.full():
-                            try: q_raw.get_nowait()
-                            except queue.Empty: pass
+                            try:
+                                q_raw.get_nowait()
+                            except queue.Empty:
+                                pass
                         q_raw.put((bgr, t_capture))
                     cap.release()
 
-                def inference_thread(pipeline, q_raw, q_result, stop_event, live_skip, bg_mode, get_bg_func):
+                def inference_thread(
+                    pipeline, q_raw, q_result, stop_event, skip_frames, skip_strategy
+                ):
                     idx = 0
                     last_result = None
+                    prev_rgb_full = None
                     inf_history = collections.deque(maxlen=30)
                     DISP_W = 640
-                    
+
                     while not stop_event.is_set():
                         try:
                             bgr, t_capture = q_raw.get(timeout=0.1)
                         except queue.Empty:
                             continue
-                        
+
                         rgb_full = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
                         h_full, w_full = rgb_full.shape[:2]
                         disp_h = int(h_full * DISP_W / w_full)
-                        
-                        if idx % live_skip == 0 or last_result is None:
+
+                        if idx % skip_frames == 0 or last_result is None:
                             try:
                                 t0 = time.perf_counter()
                                 last_result = pipeline.process_frame(rgb_full)
                                 inf_history.append(time.perf_counter() - t0)
                             except Exception:
+                                prev_rgb_full = rgb_full
+                                idx += 1
                                 continue
-                        
-                        # Move Rendering/Composition here to offload UI thread
-                        rgb_disp = cv2.resize(rgb_full, (DISP_W, disp_h))
-                        final_mask = cv2.resize(last_result["final_mask"], (DISP_W, disp_h))
-                        m3d = final_mask[:, :, np.newaxis]
-                        
-                        if bg_mode == "Couleur sidebar":
-                            final = cv2.resize(last_result["final"], (DISP_W, disp_h))
-                        elif bg_mode == "Noir":
-                            final = (rgb_disp * m3d).astype(np.uint8)
-                        elif bg_mode == "Flou (Portrait)":
-                            small = cv2.resize(rgb_disp, (DISP_W // 4, disp_h // 4))
-                            blurred = cv2.resize(cv2.GaussianBlur(small, (15, 15), 0), (DISP_W, disp_h))
-                            final = (rgb_disp * m3d + blurred * (1.0 - m3d)).astype(np.uint8)
-                        else:
-                            curr_bg = get_bg_func(bg_mode, DISP_W, disp_h)
-                            if curr_bg is not None:
-                                final = (rgb_disp * m3d + curr_bg * (1.0 - m3d)).astype(np.uint8)
-                            else:
-                                final = (rgb_disp * m3d).astype(np.uint8)
+                        elif prev_rgb_full is not None:
+                            warped_mask = skip_strategy(
+                                rgb_full, prev_rgb_full, last_result["final_mask"]
+                            )
+                            last_result = {
+                                **last_result,
+                                "final_mask": warped_mask,
+                                "final": pipeline.composite(rgb_full, warped_mask),
+                            }
 
-                        # Prepare extra debug panels if needed
-                        panels = {}
-                        # We only prepare panels if we really need them to save CPU
-                        # (Passing them through the queue is expensive)
-                        
+                        prev_rgb_full = rgb_full
+
+                        final_mask = cv2.resize(last_result["final_mask"], (DISP_W, disp_h))
                         res_data = {
-                            "final": final,
-                            "preprocessed": cv2.resize(last_result["preprocessed"], (DISP_W, disp_h)),
-                            "raw_mask": (cv2.resize(last_result["raw_mask"], (DISP_W, disp_h)) * 255).astype(np.uint8),
+                            "final": cv2.resize(last_result["final"], (DISP_W, disp_h)),
+                            "preprocessed": cv2.resize(
+                                last_result["preprocessed"], (DISP_W, disp_h)
+                            ),
+                            "raw_mask": (
+                                cv2.resize(last_result["raw_mask"], (DISP_W, disp_h)) * 255
+                            ).astype(np.uint8),
                             "final_mask_viz": (final_mask * 255).astype(np.uint8),
                             "inf_history": list(inf_history),
-                            "idx": idx,
-                            "t_capture": t_capture
+                            "timings": last_result.get("timings", {}),
+                            "t_capture": t_capture,
                         }
-                        
+
                         if q_result.full():
-                            try: q_result.get_nowait()
-                            except queue.Empty: pass
+                            try:
+                                q_result.get_nowait()
+                            except queue.Empty:
+                                pass
                         q_result.put(res_data)
                         idx += 1
 
-                # ── Background rendering logic ───────────────────────────────
-                bg_cache = {}
-                bg_resized_cache = {}
-
-                def get_bg(mode: str, w: int, h: int):
-                    if mode not in bg_cache:
-                        urls = {
-                            "Bureau Moderne": "https://images.unsplash.com/photo-1497366216548-37526070297c?auto=format&fit=crop&w=1280&q=80",
-                            "Nature": "https://images.unsplash.com/photo-1441974231531-c6227db76b6e?auto=format&fit=crop&w=1280&q=80",
-                        }
-                        url = urls.get(mode)
-                        if url is None: return None
-                        try:
-                            import urllib.request
-                            resp = urllib.request.urlopen(url)
-                            img = cv2.imdecode(np.asarray(bytearray(resp.read()), dtype="uint8"), 1)
-                            bg_cache[mode] = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-                        except Exception: return None
-                    
-                    key = (mode, w, h)
-                    if key not in bg_resized_cache:
-                        bg_resized_cache[key] = cv2.resize(bg_cache[mode], (w, h))
-                    return bg_resized_cache[key]
-
                 DISP_W = 640
                 delivery_timestamps = collections.deque(maxlen=30)
-                e2e_latencies = collections.deque(maxlen=30)
-
-                # Metrics placeholders in sidebar
-                st.sidebar.markdown("---")
-                st.sidebar.subheader("Performance")
-                real_fps_ph = st.sidebar.empty()
-                model_fps_ph = st.sidebar.empty()
-                e2e_lat_ph = st.sidebar.empty()
 
                 # Start workers
-                t_cap = threading.Thread(target=capture_thread, args=(cap, q_raw, stop_event), daemon=True)
-                t_inf = threading.Thread(target=inference_thread, args=(pipeline, q_raw, q_result, stop_event, live_skip, bg_mode, get_bg), daemon=True)
-                
+                _skip_name, _skip_params = selection.skip_strategy
+                cam_skip_strategy = skip_strategies.get(_skip_name)(**_skip_params)
+
+                t_cap = threading.Thread(
+                    target=capture_thread, args=(cap, q_raw, stop_event), daemon=True
+                )
+                t_inf = threading.Thread(
+                    target=inference_thread,
+                    args=(
+                        pipeline,
+                        q_raw,
+                        q_result,
+                        stop_event,
+                        selection.skip_frames,
+                        cam_skip_strategy,
+                    ),
+                    daemon=True,
+                )
+
                 t_cap.start()
                 t_inf.start()
 
@@ -474,64 +472,77 @@ with tab_live:
                             # Use a short timeout
                             data = q_result.get(timeout=0.02)
                         except queue.Empty:
-                            if stop_event.is_set(): break
+                            if stop_event.is_set():
+                                break
                             continue
-                        
+
                         t_now = time.time()
-                        
+
                         # Update images (placeholder already exists)
                         if show_panels:
-                            ph_orig.image(data["preprocessed"], caption="Pre-processing (BBoxes)", width="stretch", output_format="JPEG")
-                            ph_final.image(data["final"], channels="RGB", caption="Composite", width="stretch", output_format="JPEG")
-                            ph_raw.image(data["raw_mask"], caption="Masque brut", width="stretch", output_format="JPEG")
-                            ph_fin_mask.image(data["final_mask_viz"], caption="Masque final (post-proc)", width="stretch", output_format="JPEG")
+                            ph_orig.image(
+                                data["preprocessed"],
+                                caption="Pre-processing (BBoxes)",
+                                width="stretch",
+                                output_format="JPEG",
+                            )
+                            ph_final.image(
+                                data["final"],
+                                channels="RGB",
+                                caption="Composite",
+                                width="stretch",
+                                output_format="JPEG",
+                            )
+                            ph_raw.image(
+                                data["raw_mask"],
+                                caption="Masque brut",
+                                width="stretch",
+                                output_format="JPEG",
+                            )
+                            ph_fin_mask.image(
+                                data["final_mask_viz"],
+                                caption="Masque final (post-proc)",
+                                width="stretch",
+                                output_format="JPEG",
+                            )
                         else:
-                            ph_final.image(data["final"], channels="RGB", width="stretch", output_format="JPEG")
-
-                        # Metrics logic
-                        delivery_timestamps.append(t_now)
-                        e2e_latencies.append(t_now - data["t_capture"])
-
-                        # Update metrics only every 100ms to avoid UI stutter
-                        if t_now - last_ui_update > 0.1:
-                            avg_inf = sum(data["inf_history"]) / len(data["inf_history"]) if data["inf_history"] else 0
-                            model_fps = 1.0 / avg_inf if avg_inf > 0 else 0
-                            avg_e2e = sum(e2e_latencies) / len(e2e_latencies) if e2e_latencies else 0
-                            if len(delivery_timestamps) > 1:
-                                real_fps = (len(delivery_timestamps) - 1) / (delivery_timestamps[-1] - delivery_timestamps[0])
-                            else: real_fps = 0.0
-
-                            real_fps_ph.metric("FPS Réel (Affichage)", f"{real_fps:.1f}")
-                            model_fps_ph.metric("FPS Théorique (IA)", f"{model_fps:.1f}")
-                            e2e_lat_ph.metric("Latence Totale (E2E)", f"{avg_e2e*1000:.0f} ms")
-                            last_ui_update = t_now
-
-                        # Crucial: give a tiny bit of time for Streamlit's event loop
-                        time.sleep(0.001)
-
-                        inf_placeholder.metric("FPS Réel (Display)", f"{real_fps:.1f}")
-                        fps_placeholder.metric("Latence Inférence", f"{avg_inf * 1000:.0f} ms")
-                            
-                        avg_loop = 1.0 / real_fps if real_fps > 0 else 0
-                        st_debug.caption(
-                                f"Frame {idx} | "
-                                f"Pipeline IA : {avg_inf*1000:.1f}ms ({model_fps:.1f} FPS th.) | "
-                                f"Overhead Streamlit : {max(0, (avg_loop - avg_inf)*1000):.1f}ms"
+                            ph_final.image(
+                                data["final"], channels="RGB", width="stretch", output_format="JPEG"
                             )
 
-                        if "timings" in result:
-                                t = result["timings"]
+                        # Track delivery timestamps for real FPS
+                        delivery_timestamps.append(t_now)
+
+                        # Update metrics every 100 ms to avoid UI stutter
+                        if t_now - last_ui_update > 0.1:
+                            if len(delivery_timestamps) > 1:
+                                real_fps = (len(delivery_timestamps) - 1) / (
+                                    delivery_timestamps[-1] - delivery_timestamps[0]
+                                )
+                            else:
+                                real_fps = 0.0
+
+                            timings = data.get("timings", {})
+                            if timings:
                                 table_md = "| Composant | Latence (ms) |\n| :--- | :--- |\n"
-                                for k, v in t.items():
-                                    if k.startswith("pre_"): table_md += f"| 🟢 Pre: {k[4:]} | {v*1000:.2f} |\n"
-                                table_md += f"| 🧠 **Inférence IA** | **{t.get('model_inference', 0)*1000:.2f}** |\n"
-                                table_md += f"| ⬆️ **Upsampling** | **{t.get('upsampling', 0)*1000:.2f}** |\n"
-                                for k, v in t.items():
-                                    if k.startswith("post_"): table_md += f"| 🔵 Post: {k[5:]} | {v*1000:.2f} |\n"
-                                table_md += f"| 🎬 Composition | {t.get('compositing', 0)*1000:.2f} |\n"
-                                table_md += f"| --- | --- |\n"
-                                table_md += f"| ⏱️ **TOTAL PIPELINE** | **{t.get('total_pipeline', 0)*1000:.2f}** |"
+                                table_md += f"| 🎞️ **FPS** | **{real_fps:.1f}** |\n"
+                                table_md += "| --- | --- |\n"
+                                for k, v in timings.items():
+                                    if k.startswith("pre_"):
+                                        table_md += f"| 🟢 Pre: {k[4:]} | {v * 1000:.2f} |\n"
+                                table_md += f"| 🧠 **Inférence IA** | **{timings.get('model_inference', 0) * 1000:.2f}** |\n"
+                                table_md += f"| ⬆️ **Upsampling** | **{timings.get('upsampling', 0) * 1000:.2f}** |\n"
+                                for k, v in timings.items():
+                                    if k.startswith("post_"):
+                                        table_md += f"| 🔵 Post: {k[5:]} | {v * 1000:.2f} |\n"
+                                table_md += f"| 🎬 Composition | {timings.get('compositing', 0) * 1000:.2f} |\n"
+                                table_md += "| --- | --- |\n"
+                                table_md += f"| ⏱️ **TOTAL PIPELINE** | **{timings.get('total_pipeline', 0) * 1000:.2f}** |"
                                 ph_profiling.markdown(table_md)
+
+                            last_ui_update = t_now
+
+                        time.sleep(0.001)
 
                 finally:
                     # Clean shutdown
@@ -541,4 +552,3 @@ with tab_live:
 
     else:
         cam_status.info("Caméra arrêtée.")
-
