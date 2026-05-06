@@ -17,7 +17,14 @@ import numpy as np
 import streamlit as st
 from config import OUTPUT_DIR
 from core.pipeline import MattingPipeline
-from core.registry import models, postprocessors, preprocessors, skip_strategies, upsamplers
+from core.registry import (
+    compositors,
+    models,
+    postprocessors,
+    preprocessors,
+    skip_strategies,
+    upsamplers,
+)
 from core.video_io import frame_count, read_frame
 from core.video_processing import process_video
 from ui.sidebar import _BG_IMAGE_URLS, render_sidebar
@@ -30,6 +37,7 @@ models.discover("models")
 postprocessors.discover("postprocessing")
 upsamplers.discover("upsampling")
 skip_strategies.discover("skip_strategies")
+compositors.discover("compositing")
 
 
 @st.cache_resource
@@ -170,8 +178,15 @@ model = st.session_state["_model"]
 pre_components = [preprocessors.get(name)(**params) for name, params in selection.preprocessors]
 post_components = [postprocessors.get(name)(**params) for name, params in selection.postprocessors]
 bg_image = _load_bg_image(selection.bg_image_name) if selection.bg_image_name else None
+compositor_name, compositor_params = selection.compositor
+compositor = compositors.get(compositor_name)(**compositor_params)
 pipeline = MattingPipeline(
-    pre_components, model, post_components, bg_color=selection.bg_color, bg_image=bg_image
+    pre_components,
+    model,
+    post_components,
+    compositor=compositor,
+    bg_color=selection.bg_color,
+    bg_image=bg_image,
 )
 
 # ── TABS ───────────────────────────────────────────────────────────────────────

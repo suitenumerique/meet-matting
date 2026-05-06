@@ -8,35 +8,40 @@ import cv2
 import numpy as np
 
 from core import context
-from core.base import MattingModel, Postprocessor, Preprocessor
+from core.base import Compositor, MattingModel, Postprocessor, Preprocessor
 
 
 class MattingPipeline:
-    """Orchestrates preprocessing → model inference → postprocessing for a single frame."""
+    """Orchestrates preprocessing → model inference → postprocessing → compositing."""
 
     def __init__(
         self,
         preprocessors: list[Preprocessor],
         model: MattingModel,
         postprocessors: list[Postprocessor],
+        compositor: Compositor | None = None,
         bg_color: tuple[int, int, int] = (0, 0, 0),
         bg_image: np.ndarray | None = None,
     ):
+        """Initialise with params and allocate internal buffers."""
         self.preprocessors = preprocessors
         self.model = model
         self.postprocessors = postprocessors
-        self._bg_color = bg_color
-        self._bg_image = bg_image
-        self._bg = np.array(bg_color, dtype=np.float32)[None, None, :]  # (1, 1, 3)
+        self._compositor = compositor
+        if bg_image is not None:
+            self._bg = bg_image.astype(np.float32)  # (H, W, 3)
+        else:
+            self._bg = np.array(bg_color, dtype=np.float32)[None, None, :]  # (1, 1, 3)
 
-        # ── Pre-allocated composition buffers (lazily sized on first frame) ──
-        self._buf_mask3: np.ndarray | None = None  # uint8 (H, W, 3)
-        self._buf_inv3: np.ndarray | None = None  # uint8 (H, W, 3)
-        self._bg_u8: np.ndarray | None = None  # uint8 (H, W, 3)
-        self._buf_shape: tuple[int, int] = (0, 0)  # (H, W) of last frame
+    def _prepare_bg(self, h: int, w: int) -> np.ndarray:
+        """Return background resized to (h, w) if needed."""
+        bg = self._bg
+        if bg.ndim == 3 and bg.shape[:2] != (h, w):
+            bg = cv2.resize(bg, (w, h), interpolation=cv2.INTER_LINEAR).astype(np.float32)
+        return bg
 
     def composite(self, frame: np.ndarray, mask: np.ndarray) -> np.ndarray:
-        """Composite *frame* over the configured background using *mask*, without running inference.
+        """Composite *frame* over the configured background using *mask*.
 
         Args:
             frame: RGB image, shape (H, W, 3), dtype uint8.
@@ -45,25 +50,14 @@ class MattingPipeline:
         Returns:
             Composited RGB image, shape (H, W, 3), dtype uint8.
         """
+        alpha = mask.squeeze() if mask.ndim > 2 else mask
         h, w = frame.shape[:2]
-        if self._buf_shape != (h, w):
-            self._buf_mask3 = np.empty((h, w, 3), dtype=np.uint8)
-            self._buf_inv3 = np.empty((h, w, 3), dtype=np.uint8)
-            self._buf_shape = (h, w)
-            if self._bg_image is not None:
-                bg = cv2.resize(self._bg_image, (w, h))
-                self._bg_u8 = bg if bg.dtype == np.uint8 else bg.astype(np.uint8)
-            else:
-                self._bg_u8 = np.full((h, w, 3), self._bg_color, dtype=np.uint8)
-
-        final_mask = mask.squeeze() if mask.ndim > 2 else mask
-        mask_u8 = np.clip(final_mask * 255.0, 0, 255).astype(np.uint8)
-        cv2.merge((mask_u8, mask_u8, mask_u8), dst=self._buf_mask3)
-        np.subtract(255, self._buf_mask3, out=self._buf_inv3)
-        _S = 1.0 / 255.0
-        fg = cv2.multiply(frame, self._buf_mask3, scale=_S, dtype=cv2.CV_8U)
-        bg = cv2.multiply(self._bg_u8, self._buf_inv3, scale=_S, dtype=cv2.CV_8U)
-        return cv2.add(fg, bg)
+        bg = self._prepare_bg(h, w)
+        if self._compositor is not None:
+            return self._compositor.composite(frame, bg, alpha)
+        # Fallback: inline alpha blend
+        mask3 = alpha[..., None]
+        return (frame * mask3 + bg * (1.0 - mask3)).clip(0, 255).astype(np.uint8)
 
     def reset(self):
         """Reset state of all components (counters, buffers, etc.)."""
@@ -95,7 +89,7 @@ class MattingPipeline:
 
         # 2. Model Inference (with automatic Person Zoom support)
         t_model_start = time.perf_counter()
-        context.set_val("upsampling_time", 0.0)  # Reset for this frame
+        context.set_val("upsampling_time", 0.0)
 
         bboxes = context.get_val("person_bboxes", [])
         zoom_active = context.get_val("person_zoom_active", False)
@@ -122,7 +116,6 @@ class MattingPipeline:
                 if mask_expanded.ndim == 3:
                     mask_expanded = mask_expanded.squeeze(-1)
 
-                # Time the crop upsampling (back to original resolution of the crop)
                 t_up_start = time.perf_counter()
                 mask_expanded = cv2.resize(
                     mask_expanded, (ex2 - ex1, ey2 - ey1), interpolation=cv2.INTER_LINEAR
@@ -152,7 +145,7 @@ class MattingPipeline:
             timings[f"post_{post.name}"] = time.perf_counter() - t_c_start
         timings["postprocessing_total"] = time.perf_counter() - t_post_start
 
-        # 4. Final Compositing — uint8 fast path (OpenCV SIMD)
+        # 4. Final Compositing
         t_comp_start = time.perf_counter()
         if final_mask.ndim == 3:
             final_mask = final_mask.squeeze(-1)
@@ -160,7 +153,6 @@ class MattingPipeline:
         timings["compositing"] = time.perf_counter() - t_comp_start
 
         # 5. Prepare debug view
-        # We draw boxes on a separate debug frame
         debug_frame = original.copy()
         if zoom_active:
             for x1, y1, x2, y2 in bboxes:
@@ -202,7 +194,8 @@ class MattingPipeline:
                             getattr(p1, "visibility", 1.0) > 0.5
                             and getattr(p2, "visibility", 1.0) > 0.5
                         ):
-                            c1, c2 = (int(p1.x * w), int(p1.y * h)), (int(p2.x * w), int(p2.y * h))
+                            c1 = (int(p1.x * w), int(p1.y * h))
+                            c2 = (int(p2.x * w), int(p2.y * h))
                             cv2.line(debug_frame, c1, c2, (0, 255, 255), 2)
                 for lm in pose_landmarks:
                     if getattr(lm, "visibility", 1.0) > 0.5:

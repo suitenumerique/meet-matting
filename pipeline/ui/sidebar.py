@@ -1,3 +1,5 @@
+"""Streamlit sidebar: component selection, parameter widgets, and the SidebarSelection dataclass."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -5,7 +7,14 @@ from pathlib import Path
 
 import streamlit as st
 from config import VIDEO_DIR
-from core.registry import models, postprocessors, preprocessors, skip_strategies, upsamplers
+from core.registry import (
+    compositors,
+    models,
+    postprocessors,
+    preprocessors,
+    skip_strategies,
+    upsamplers,
+)
 from core.video_io import list_videos
 
 from ui.widgets import render_component_config
@@ -25,6 +34,7 @@ class SidebarSelection:
     upsampler: tuple[str, dict]
     bg_color: tuple[int, int, int]
     bg_image_name: str | None
+    compositor: tuple[str, dict]
     skip_frames: int
     skip_strategy: tuple[str, dict]
     preprocessors: list[tuple[str, dict]] = field(default_factory=list)
@@ -40,8 +50,9 @@ def render_sidebar() -> SidebarSelection:
         3. Model selector + parameters
         4. Upsampling method + parameters
         5. Postprocessors
-        6. Background colour
-        7. Skip Frames
+        6. Background
+        7. Composition
+        8. Skip Frames
     """
     # --- 1. Video ---
     with st.sidebar.expander("Video", expanded=True):
@@ -120,7 +131,9 @@ def render_sidebar() -> SidebarSelection:
     # --- 5. Postprocessors ---
     with st.sidebar.expander("Postprocessors", expanded=False):
         st.caption("Refinements applied to the raw mask *after* the model, before compositing.")
-        post_names = postprocessors.names()
+        post_names = [
+            n for n in postprocessors.names() if not getattr(postprocessors.get(n), "hidden", False)
+        ]
         chosen_post = st.multiselect(
             "Postprocessing steps (applied in order)",
             options=post_names,
@@ -153,7 +166,26 @@ def render_sidebar() -> SidebarSelection:
             bg_color = (0, 0, 0)
             bg_image_name = bg_type
 
-    # --- 7. Skip Frames ---
+    # --- 7. Composition ---
+    with st.sidebar.expander("Composition", expanded=False):
+        st.caption(
+            "Assemblage visuel final du sujet sur le fond. "
+            "L'**Alpha blending** est la fusion classique par transparence. "
+            "Le **Light wrapping** laisse la lumière du fond déborder subtilement "
+            "sur les contours du sujet pour une intégration plus naturelle."
+        )
+        compositor_names = compositors.names()
+        chosen_compositor = st.selectbox(
+            "Méthode",
+            options=compositor_names,
+            key="compositor_select",
+        )
+        compositor_cls = compositors.get(chosen_compositor)
+        st.caption(compositor_cls.description)
+        compositor_params = render_component_config(compositor_cls, key_prefix="compositor")
+        compositor: tuple[str, dict] = (chosen_compositor, compositor_params)
+
+    # --- 8. Skip Frames ---
     with st.sidebar.expander("Skip Frames", expanded=False):
         st.caption(
             "Speed up export by running the model only every N frames. "
@@ -185,6 +217,7 @@ def render_sidebar() -> SidebarSelection:
         upsampler=upsampler,
         bg_color=bg_color,
         bg_image_name=bg_image_name,
+        compositor=compositor,
         skip_frames=skip_frames,
         skip_strategy=skip_strategy,
         preprocessors=pre_configs,
