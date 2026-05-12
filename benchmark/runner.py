@@ -18,8 +18,10 @@ import shutil
 import threading
 import time
 import warnings
+from collections import defaultdict
 from collections.abc import Callable, Generator
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -47,6 +49,10 @@ logging.getLogger("streamlit.runtime.scriptrunner_utils.script_run_context").dis
 warnings.filterwarnings("ignore", message="missing ScriptRunContext")
 
 logger = logging.getLogger(__name__)
+
+
+class BenchmarkStoppedError(Exception):
+    """Levée quand l'utilisateur demande l'arrêt du benchmark en cours."""
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -472,25 +478,6 @@ def _load_masks(masks_dir: Path) -> list[np.ndarray]:
     return masks
 
 
-def load_masks_from_mask_video(mask_video_path: Path) -> list[np.ndarray]:
-    """
-    Reload float32 [0,1] masks from a *_mask.mp4 output file.
-
-    The mask MP4 was saved as a greyscale video encoded in RGB
-    (cv2.COLOR_GRAY2RGB). This function reverses that conversion.
-    """
-    masks = []
-    cap = cv2.VideoCapture(str(mask_video_path))
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        masks.append(gray.astype(np.uint8))
-    cap.release()
-    return masks
-
-
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Étape 1 : Inférence
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -500,6 +487,7 @@ def run_inference(
     output_dir: Path | None,
     batch_size: int = 8,
     collect_masks: bool = True,
+    stop_event: threading.Event | None = None,
 ) -> dict:
     """
     Exécute l'inférence sur une vidéo en streaming avec prefetching et batching.
@@ -538,6 +526,12 @@ def run_inference(
             if not ret:
                 break
 
+            if stop_event is not None and stop_event.is_set():
+                cap.release()
+                raise BenchmarkStoppedError(
+                    f"Arrêt demandé à la frame {frame_idx} ({model.name} / {video_path.name})"
+                )
+
             t_start = time.perf_counter()
             # On resize directement ici pour être le plus rapide possible
             if target_size:
@@ -552,17 +546,13 @@ def run_inference(
 
             if collect_masks:
                 assert masks_in_ram is not None  # garanti par collect_masks=True à l'init
-                # SÉCURITÉ ABSOLUE : On vérifie que mask n'est pas None avant TOUTE opération
-                if mask is not None:
-                    try:
-                        mask_u8 = (mask * 255).astype(np.uint8)
-                        masks_in_ram.append(mask_u8)
-                    except Exception as e:
-                        logger.error(f"Erreur multiplication masque : {e}")
-                        masks_in_ram.append(np.zeros((h, w), dtype=np.uint8))
-                else:
-                    # Si le modèle a échoué (None), on met un masque noir au lieu de crasher
-                    masks_in_ram.append(np.zeros((h, w), dtype=np.uint8))
+                if mask is None:
+                    raise RuntimeError(
+                        f"Le modèle {model.name} a renvoyé None à la frame {frame_idx} "
+                        f"({video_path.name}). Aucun masque ne peut être produit."
+                    )
+                mask_u8 = (mask * 255).astype(np.uint8)
+                masks_in_ram.append(mask_u8)
 
             frame_idx += 1
             pbar.update(1)
@@ -571,26 +561,36 @@ def run_inference(
         cap.release()
 
     # Calcul des statistiques
-    latencies_arr = np.array(latencies) if latencies else np.array([0.0])
+    if not latencies:
+        raise RuntimeError(
+            f"Aucune latence collectée pour {model.name} sur {video_path.name}: "
+            f"vidéo trop courte (≤ {WARMUP_FRAMES} frames) ou aucune frame lue."
+        )
+    latencies_arr = np.array(latencies)
     p95 = float(np.percentile(latencies_arr, LATENCY_PERCENTILE))
-    flops = model.get_flops(input_shape)
+    mean_ms = float(latencies_arr.mean())
+    # FPS d'inférence pure (inverse de la latence moyenne par frame)
+    fps_inference = 1000.0 / mean_ms if mean_ms > 0 else 0.0
+
+    # Garde input_shape référencé pour compat (les modèles peuvent en avoir besoin)
+    _ = input_shape
 
     result = {
         "latencies_ms": latencies,
         "latency_p95_ms": p95,
-        "latency_mean_ms": float(latencies_arr.mean()),
+        "latency_mean_ms": mean_ms,
         "latency_std_ms": float(latencies_arr.std()),
-        "flops_per_frame": flops,
+        "fps": fps_inference,
         "num_frames": total_frames,
         "masks": masks_in_ram,
     }
 
     logger.info(
-        "%s — Latence p95: %.2f ms | Moyenne: %.2f ms | FLOPs: %.2e",
+        "%s — Latence p95: %.2f ms | Moyenne: %.2f ms | FPS inférence: %.1f",
         model.name,
         p95,
-        result["latency_mean_ms"],
-        flops,
+        mean_ms,
+        fps_inference,
     )
 
     return result
@@ -604,10 +604,13 @@ def run_evaluation(
     gt_masks: list[np.ndarray],
     video_path: Path | None = None,
     masks: list[np.ndarray] | None = None,
+    threshold: float = 0.5,
+    frames: list[np.ndarray] | None = None,
 ) -> dict:
     """
-    Calcule les métriques vs GT.
+    Calcule les métriques vs GT au seuil donné.
     Peut prendre soit un répertoire de masques (disque), soit une liste (RAM).
+    Si `frames` est fourni, il est réutilisé directement pour le FWE (évite une relecture disque).
     """
     if masks:
         pred_masks = masks
@@ -617,20 +620,22 @@ def run_evaluation(
         pred_masks = _load_masks(masks_dir)
 
     if not pred_masks:
-        logger.error("Aucun masque prédit trouvé dans %s", masks_dir)
-        return {
-            "iou_mean": 0.0,
-            "iou_std": 0.0,
-            "boundary_f_mean": 0.0,
-            "boundary_f_std": 0.0,
-            "flow_warping_error": 0.0,
-        }
+        raise RuntimeError(
+            f"Aucun masque prédit trouvé (masks_dir={masks_dir}). "
+            "L'évaluation ne peut pas se faire."
+        )
 
     logger.info("Évaluation : %d masques prédits vs %d GT", len(pred_masks), len(gt_masks))
 
-    frames_iter = _iter_video_frames(video_path) if video_path else None
+    frames_iter: list[np.ndarray] | None
+    if frames is not None:
+        frames_iter = frames
+    elif video_path is not None:
+        frames_iter = list(_iter_video_frames(video_path))
+    else:
+        frames_iter = None
 
-    metrics = compute_all_metrics(pred_masks, gt_masks, frames_iter)
+    metrics = compute_all_metrics(pred_masks, gt_masks, frames_iter, threshold=threshold)
 
     logger.info(
         "Résultats — IoU: %.4f ± %.4f | BoundaryF: %.4f ± %.4f | FWE: %.4f",
@@ -723,12 +728,25 @@ def run_benchmark(
     progress_callback: Callable[[int, int, str], None] | None = None,
     on_result: Callable[[dict], None] | None = None,
     analyze_thresholds: bool = False,
-) -> list[dict]:
+    threshold: float = 0.5,
+    stop_event: threading.Event | None = None,
+) -> dict[str, Any]:
     """
     Exécute le benchmark complet pour tous les modèles sur toutes les vidéos.
 
     Args:
         progress_callback: Fonction appelée à chaque étape (current, total, message).
+        threshold: Seuil de binarisation utilisé quand analyze_thresholds=False.
+        analyze_thresholds: Si True, effectue un balayage de seuils [0.1, 0.9] et
+            calcule le meilleur seuil par modèle (argmax IoU moyenné sur les vidéos).
+
+    Returns:
+        Dict avec les clés:
+            - "results": list[dict] des résultats par (modèle, vidéo)
+            - "best_thresholds": dict[model_name, float] (vide si analyze_thresholds=False)
+            - "global_pipeline_fps": float — FPS pipeline global du benchmark
+            - "wall_clock_total_s": float — durée totale en secondes
+            - "history_dir": Path | None — dossier d'historique créé
     """
     import random
 
@@ -737,19 +755,32 @@ def run_benchmark(
     temp_dir.mkdir(parents=True, exist_ok=True)
 
     masks_final_dir = output_dir / "masks"
-    if save_masks:
+    if save_masks or save_video or save_segmented:
         masks_final_dir.mkdir(parents=True, exist_ok=True)
+
+    # ── Dossier d'historique numéroté (un par benchmark lancé) ──
+    history_root = output_dir / "history"
+    history_root.mkdir(parents=True, exist_ok=True)
+    existing = sorted(p for p in history_root.glob("benchmark_*") if p.is_dir())
+    if existing:
+        last_id_str = existing[-1].name.split("_", 1)[1]
+        next_id = int(last_id_str) + 1
+    else:
+        next_id = 1
+    run_dir = history_root / f"benchmark_{next_id:04d}"
+    run_dir.mkdir()
+    logger.info("📁 Historique du benchmark : %s", run_dir)
+
+    # Chemins générés pendant ce run — utilisés par le dashboard pour le nettoyage en cas d'arrêt.
+    model_dirs_created: list[Path] = [run_dir]
 
     # Découvrir les datasets
     datasets = discover_datasets(videos_dir, gt_dir)
     if not datasets:
-        logger.error(
-            "Aucun dataset trouvé. Vérifie que des vidéos sont dans %s "
-            "et des GT correspondants dans %s.",
-            videos_dir,
-            gt_dir,
+        raise FileNotFoundError(
+            f"Aucun dataset trouvé. Vérifie que des vidéos sont dans {videos_dir} "
+            f"et des GT correspondants dans {gt_dir}."
         )
-        return []
 
     # Sélection par indices spécifiques (si fournis)
     if video_indices is not None and len(video_indices) > 0:
@@ -768,9 +799,11 @@ def run_benchmark(
                 "aléatoire" if random_selection else "ordonnée",
             )
 
-    all_results = []
+    all_results: list[dict] = []
     total_combos = len(models) * len(datasets)
     current_combo = 0
+    total_frames_global = 0
+    wall_clock_start = time.perf_counter()
 
     logger.info("=" * 72)
     logger.info(
@@ -784,444 +817,354 @@ def run_benchmark(
     if progress_callback:
         progress_callback(0, total_combos, "Démarrage du benchmark...")
 
-    for model in models:
-        logger.info("─" * 72)
-        logger.info("Modèle : %s", model.name)
-        logger.info("─" * 72)
+    _stopped = False
+    try:
+        for model in models:
+            logger.info("─" * 72)
+            logger.info("Modèle : %s", model.name)
+            logger.info("─" * 72)
 
-        # Charger le modèle
-        try:
-            model.load()
-        except Exception as e:
-            logger.error("Échec du chargement de %s : %s", model.name, e)
-            # Enregistrer un résultat d'erreur pour chaque vidéo
-            for video_path, _ in datasets:
-                all_results.append(
-                    {
-                        "model": model.name,
-                        "video": video_path.name,
-                        "status": "LOAD_ERROR",
-                        "error": str(e),
-                    }
-                )
-            continue
-
-        for video_path, gt_path in datasets:
-            logger.info("\n📹 Vidéo : %s", video_path.name)
-            result_entry: dict[str, Any] = {
-                "model": model.name,
-                "video": video_path.name,
-                "status": "OK",
-            }
+            # Charger le modèle
+            try:
+                model.load()
+            except Exception as e:
+                logger.error("Échec du chargement de %s : %s", model.name, e)
+                for video_path, _ in datasets:
+                    all_results.append(
+                        {
+                            "model": model.name,
+                            "video": video_path.name,
+                            "status": "LOAD_ERROR",
+                            "error": str(e),
+                        }
+                    )
+                continue
 
             try:
-                # ── Infos vidéo ──
-                num_frames, fps, (w_h) = _get_video_info(video_path)
-                result_entry["fps_source"] = fps
-                result_entry["resolution"] = f"{w_h[0]}x{w_h[1]}"
-
-                # ── Charger le GT ──
-                gt_masks = _load_ground_truth_masks(gt_path, num_frames)
-                if not gt_masks:
-                    logger.warning("Pas de GT disponible pour %s.", video_path.name)
-
-                # ── Étape 1 : Inférence (Streaming + Prefetch) ──
-                # On évite d'écrire sur disque si on ne veut que les métriques
-                masks_output = temp_dir / f"{model.name.replace(' ', '_')}_{video_path.stem}"
-
-                # Si save_masks est False, on ne passe pas de masks_output à run_inference
-                # mais on demande de collecter les masques en RAM pour l'évaluation.
-                inference_result = run_inference(
-                    model, video_path, masks_output if save_masks else None, collect_masks=True
-                )
-
-                result_entry.update(
-                    {
-                        "latency_p95_ms": round(inference_result["latency_p95_ms"], 2),
-                        "latency_mean_ms": round(inference_result["latency_mean_ms"], 2),
-                        "latency_std_ms": round(inference_result["latency_std_ms"], 2),
-                        "flops_per_frame": inference_result["flops_per_frame"],
-                        "num_frames": inference_result["num_frames"],
+                for video_path, gt_path in datasets:
+                    logger.info("\n📹 Vidéo : %s", video_path.name)
+                    result_entry: dict[str, Any] = {
+                        "model": model.name,
+                        "video": video_path.name,
+                        "status": "OK",
                     }
-                )
 
-                # ── Étape 2 : Évaluation (RAM ou Disque) ──
-                if gt_masks:
-                    eval_result = run_evaluation(
-                        masks_output if save_masks else None,
-                        gt_masks,
-                        video_path,
-                        masks=inference_result.get("masks"),
-                    )
-                    result_entry.update(
-                        {
-                            "iou_mean": round(eval_result["iou_mean"], 4),
-                            "iou_std": round(eval_result["iou_std"], 4),
-                            "boundary_f_mean": round(eval_result["boundary_f_mean"], 4),
-                            "boundary_f_std": round(eval_result["boundary_f_std"], 4),
-                            "flow_warping_error": round(eval_result["flow_warping_error"], 4),
-                        }
-                    )
+                    # Wall-clock englobant inférence + GT + évaluation + export
+                    t_combo_start = time.perf_counter()
 
-                    # ── Threshold sensitivity analysis ──────────────────────
-                    if analyze_thresholds and inference_result.get("masks"):
-                        pred_masks_all = inference_result["masks"]
-                        n_th = min(len(pred_masks_all), len(gt_masks))
-                        th_range = [round(t * 0.1, 1) for t in range(1, 10)]
-                        th_analysis: dict[str, dict] = {}
-                        for t in th_range:
-                            th_m = compute_all_metrics(
-                                pred_masks_all[:n_th],
-                                gt_masks[:n_th],
-                                frames=None,
-                                threshold=t,
+                    try:
+                        # ── Infos vidéo ──
+                        num_frames, fps_src, (w_h) = _get_video_info(video_path)
+                        result_entry["fps_source"] = fps_src
+                        result_entry["resolution"] = f"{w_h[0]}x{w_h[1]}"
+
+                        # ── Charger le GT ──
+                        gt_masks = _load_ground_truth_masks(gt_path, num_frames)
+                        if not gt_masks:
+                            raise FileNotFoundError(
+                                f"Pas de GT disponible pour {video_path.name} "
+                                f"(cherché dans {gt_path}). Le calcul des métriques est impossible."
                             )
-                            th_analysis[str(t)] = {
-                                "iou_mean": round(th_m["iou_mean"], 4),
-                                "boundary_f_mean": round(th_m["boundary_f_mean"], 4),
+
+                        # ── Étape 1 : Inférence ──
+                        masks_output = (
+                            temp_dir / f"{model.name.replace(' ', '_')}_{video_path.stem}"
+                        )
+                        inference_result = run_inference(
+                            model,
+                            video_path,
+                            masks_output if save_masks else None,
+                            collect_masks=True,
+                            stop_event=stop_event,
+                        )
+
+                        result_entry.update(
+                            {
+                                "latency_p95_ms": round(inference_result["latency_p95_ms"], 2),
+                                "latency_mean_ms": round(inference_result["latency_mean_ms"], 2),
+                                "latency_std_ms": round(inference_result["latency_std_ms"], 2),
+                                "fps": round(inference_result["fps"], 2),
+                                "num_frames": inference_result["num_frames"],
                             }
-                        result_entry["threshold_analysis"] = th_analysis
-                else:
-                    result_entry.update(
-                        {
-                            "iou_mean": None,
-                            "iou_std": None,
-                            "boundary_f_mean": None,
-                            "boundary_f_std": None,
-                            "flow_warping_error": None,
-                        }
+                        )
+
+                        # ── Charger les frames une seule fois (FWE + save_segmented) ──
+                        source_frames, _ = _read_video_frames(video_path)
+
+                        # ── Étape 2 : Évaluation ──
+                        eval_result = run_evaluation(
+                            masks_output if save_masks else None,
+                            gt_masks,
+                            video_path=None,
+                            masks=inference_result.get("masks"),
+                            threshold=threshold,
+                            frames=source_frames,
+                        )
+                        result_entry.update(
+                            {
+                                "iou_mean": round(eval_result["iou_mean"], 4),
+                                "iou_std": round(eval_result["iou_std"], 4),
+                                "boundary_f_mean": round(eval_result["boundary_f_mean"], 4),
+                                "boundary_f_std": round(eval_result["boundary_f_std"], 4),
+                                "flow_warping_error": round(eval_result["flow_warping_error"], 4),
+                                "threshold": threshold,
+                            }
+                        )
+
+                        # ── Threshold sensitivity analysis ──
+                        if analyze_thresholds:
+                            pred_masks_all = inference_result.get("masks")
+                            if not pred_masks_all:
+                                raise RuntimeError(
+                                    f"analyze_thresholds=True mais aucun masque collecté pour "
+                                    f"{model.name} / {video_path.name}."
+                                )
+                            n_th = min(len(pred_masks_all), len(gt_masks))
+                            th_range = [round(t * 0.1, 1) for t in range(1, 10)]
+                            th_analysis: dict[str, dict] = {}
+                            for t in th_range:
+                                th_m = compute_all_metrics(
+                                    pred_masks_all[:n_th],
+                                    gt_masks[:n_th],
+                                    frames=source_frames[:n_th],
+                                    threshold=t,
+                                )
+                                th_analysis[str(t)] = {
+                                    "iou_mean": round(th_m["iou_mean"], 4),
+                                    "boundary_f_mean": round(th_m["boundary_f_mean"], 4),
+                                    "flow_warping_error": round(th_m["flow_warping_error"], 4),
+                                }
+                            result_entry["threshold_analysis"] = th_analysis
+
+                        # ── Sauvegarde permanente si demandée ──
+                        if save_masks or save_video or save_segmented:
+                            model_dir = masks_final_dir / model.name.replace(" ", "_")
+                            if model_dir not in model_dirs_created:
+                                model_dirs_created.append(model_dir)
+                            dest_base = model_dir / video_path.stem
+                            dest_base.mkdir(parents=True, exist_ok=True)
+
+                            m_temp = inference_result.get("masks")
+                            if not m_temp or len(m_temp) == 0:
+                                m_temp = _load_masks(masks_output)
+
+                            if save_masks:
+                                _save_masks(m_temp, dest_base)
+                                logger.info("💾 Masques PNG sauvegardés dans : %s", dest_base)
+
+                            if save_video:
+                                video_out_path = (
+                                    dest_base.parent
+                                    / f"{video_path.stem}_{model.name.replace(' ', '_')}_mask.mp4"
+                                )
+                                _save_masks_as_video_fast(m_temp, video_out_path, fps_src)
+                                logger.info("🎬 Vidéo masque sauvegardée : %s", video_out_path)
+
+                            if save_segmented:
+                                seg_video_path = (
+                                    dest_base.parent
+                                    / f"{video_path.stem}_{model.name.replace(' ', '_')}_segmented.mp4"
+                                )
+                                _save_segmented_video(
+                                    m_temp, source_frames, seg_video_path, fps_src
+                                )
+                                logger.info("🎨 Vidéo détourée sauvegardée : %s", seg_video_path)
+
+                        # ── Nettoyage des masques temporaires ──
+                        if masks_output.exists():
+                            shutil.rmtree(masks_output)
+                            logger.info("🗑️  Masques temporaires supprimés : %s", masks_output)
+
+                    except BenchmarkStoppedError:
+                        raise
+                    except Exception as e:
+                        logger.exception("Erreur pour %s / %s : %s", model.name, video_path.name, e)
+                        result_entry["status"] = "ERROR"
+                        result_entry["error"] = str(e)
+
+                    # Wall-clock de la combinaison → FPS pipeline
+                    combo_elapsed = time.perf_counter() - t_combo_start
+                    n_frames_combo = int(result_entry.get("num_frames") or 0)
+                    result_entry["wall_clock_s"] = round(combo_elapsed, 3)
+                    result_entry["pipeline_fps"] = (
+                        round(n_frames_combo / combo_elapsed, 2) if combo_elapsed > 0 else 0.0
                     )
+                    total_frames_global += n_frames_combo
 
-                # ── Sauvegarde permanente si demandée ──
-                if save_masks or save_video or save_segmented:
-                    dest_base = masks_final_dir / model.name.replace(" ", "_") / video_path.stem
-                    dest_base.mkdir(parents=True, exist_ok=True)
+                    all_results.append(result_entry)
 
-                    # Utiliser les masques en RAM si l'écriture disque a été bypassée
-                    m_temp = inference_result.get("masks")
-                    if not m_temp or len(m_temp) == 0:
-                        m_temp = _load_masks(masks_output)
-
-                    if save_masks:
-                        _save_masks(m_temp, dest_base)
-                        logger.info("💾 Masques PNG sauvegardés dans : %s", dest_base)
-
-                    if save_video:
-                        video_out_path = (
-                            dest_base.parent
-                            / f"{video_path.stem}_{model.name.replace(' ', '_')}_mask.mp4"
+                    current_combo += 1
+                    if progress_callback:
+                        progress_callback(
+                            current_combo,
+                            total_combos,
+                            f"Traité : {model.name} / {video_path.name}",
                         )
-                        _save_masks_as_video_fast(m_temp, video_out_path, fps)
-                        logger.info("🎬 Vidéo masque sauvegardée : %s", video_out_path)
 
-                    if save_segmented:
-                        # Lire les frames à nouveau pour le détourage
-                        frames_list, _ = _read_video_frames(video_path)
-                        seg_video_path = (
-                            dest_base.parent
-                            / f"{video_path.stem}_{model.name.replace(' ', '_')}_segmented.mp4"
-                        )
-                        _save_segmented_video(m_temp, frames_list, seg_video_path, fps)
-                        logger.info("🎨 Vidéo détourée sauvegardée : %s", seg_video_path)
+                    if on_result:
+                        on_result(result_entry)
 
-                    # ── Vidéos de DEBUG EVAL (Intersection / Union) ──
-                    if gt_masks and len(gt_masks) > 0:
-                        frames_list_debug, _ = _read_video_frames(video_path)
-                        _save_eval_debug_videos(m_temp, gt_masks, frames_list_debug, dest_base, fps)
+            except BenchmarkStoppedError:
+                raise
+            finally:
+                model.cleanup()
 
-                # ── Nettoyage des masques temporaires ──
-                if masks_output.exists():
-                    shutil.rmtree(masks_output)
-                    logger.info("🗑️  Masques temporaires supprimés : %s", masks_output)
+    except BenchmarkStoppedError:
+        _stopped = True
+        logger.info("🛑 Benchmark arrêté par l'utilisateur.")
 
-            except Exception as e:
-                logger.error("Erreur pour %s / %s : %s", model.name, video_path.name, e)
-                result_entry["status"] = "ERROR"
-                result_entry["error"] = str(e)
+    wall_clock_total = time.perf_counter() - wall_clock_start
+    global_pipeline_fps = total_frames_global / wall_clock_total if wall_clock_total > 0 else 0.0
 
-            all_results.append(result_entry)
+    # En cas d'arrêt : ne pas écrire de rapports partiels, laisser le dashboard nettoyer.
+    if _stopped:
+        logger.info(
+            "🛑 Benchmark interrompu — %d résultat(s) partiel(s), aucun rapport écrit.",
+            len(all_results),
+        )
+        return {
+            "results": all_results,
+            "best_thresholds": {},
+            "global_pipeline_fps": 0.0,
+            "wall_clock_total_s": round(wall_clock_total, 2),
+            "history_dir": run_dir,
+            "stopped": True,
+            "model_dirs_created": model_dirs_created,
+        }
 
-            # Mise à jour progression
-            current_combo += 1
-            if progress_callback:
-                progress_callback(
-                    current_combo, total_combos, f"Traité : {model.name} / {video_path.name}"
+    # ── Meilleur seuil par modèle (argmax IoU moyenné sur les vidéos) ──
+    best_thresholds: dict[str, float] = {}
+    if analyze_thresholds:
+        best_thresholds = _compute_best_thresholds(all_results)
+        # Reporter le meilleur seuil et ses métriques dans chaque ligne du résultat
+        for r in all_results:
+            if r.get("status") != "OK":
+                continue
+            ta = r.get("threshold_analysis")
+            if not ta:
+                continue
+            model_name = r["model"]
+            if model_name not in best_thresholds:
+                raise RuntimeError(
+                    f"Pas de seuil optimal calculé pour {model_name}: "
+                    f"threshold_analysis manquant ou inconsistant."
                 )
+            t_best = best_thresholds[model_name]
+            metrics_best = ta[str(t_best)]
+            r["best_threshold"] = t_best
+            r["iou_mean"] = metrics_best["iou_mean"]
+            r["boundary_f_mean"] = metrics_best["boundary_f_mean"]
+            r["flow_warping_error"] = metrics_best["flow_warping_error"]
+            r["threshold"] = t_best
 
-            if on_result:
-                on_result(result_entry)
-
-        # Libérer le modèle
-        model.cleanup()
-
-    # ── Générer les rapports ──
-    _save_csv_report(all_results, output_dir)
+    # ── Générer les rapports (output/ + run_dir/) ──
+    _save_csv_report(all_results, output_dir, analyze_thresholds=analyze_thresholds)
     _save_json_report(all_results, output_dir)
+    _save_csv_report(all_results, run_dir, analyze_thresholds=analyze_thresholds)
+    _save_json_report(all_results, run_dir)
+
+    summary = {
+        "id": next_id,
+        "timestamp": datetime.now().isoformat(timespec="seconds"),
+        "models": sorted(m.name for m in models),
+        "num_videos": len(datasets),
+        "num_results": len(all_results),
+        "global_pipeline_fps": round(global_pipeline_fps, 2),
+        "wall_clock_total_s": round(wall_clock_total, 2),
+        "analyze_thresholds": analyze_thresholds,
+        "threshold": None if analyze_thresholds else threshold,
+        "best_thresholds": best_thresholds,
+    }
+    with open(run_dir / "summary.json", "w", encoding="utf-8") as f:
+        json.dump(summary, f, indent=2, ensure_ascii=False)
 
     logger.info("=" * 72)
     logger.info("✅ BENCHMARK TERMINÉ — %d résultats enregistrés.", len(all_results))
     logger.info("   CSV  : %s", output_dir / RESULTS_CSV_FILENAME)
     logger.info("   JSON : %s", output_dir / RESULTS_JSON_FILENAME)
+    logger.info("   History : %s", run_dir)
+    logger.info(
+        "   FPS pipeline global : %.2f (frames=%d, wall=%.2fs)",
+        global_pipeline_fps,
+        total_frames_global,
+        wall_clock_total,
+    )
     logger.info("=" * 72)
 
-    return all_results
+    return {
+        "results": all_results,
+        "best_thresholds": best_thresholds,
+        "global_pipeline_fps": global_pipeline_fps,
+        "wall_clock_total_s": wall_clock_total,
+        "history_dir": run_dir,
+        "stopped": False,
+        "model_dirs_created": model_dirs_created,
+    }
 
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  Post-hoc metrics on saved outputs
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+def _compute_best_thresholds(results: list[dict]) -> dict[str, float]:
+    """Pour chaque modèle, retourne le seuil qui maximise la moyenne d'IoU
+    sur l'ensemble des vidéos analysées.
 
-
-def _load_cached_latency(output_dir: Path) -> dict[str, dict]:
-    """Read per-model latency/FLOPs cached in benchmark_results.csv.
-
-    Returns a dict: model_name → {latency_p95_ms, latency_mean_ms,
-    latency_std_ms, flops_per_frame} (values may be None if not present).
+    Lève une RuntimeError si un modèle a des analyses partielles (certains seuils
+    manquants pour certaines vidéos).
     """
-    csv_path = output_dir / RESULTS_CSV_FILENAME
-    if not csv_path.exists():
-        return {}
-
-    cache: dict[str, dict] = {}
-    with open(csv_path, newline="", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            model = row.get("model", "").strip()
-            if not model or model in cache:
-                continue
-            entry: dict = {}
-            for key in ("latency_p95_ms", "latency_mean_ms", "latency_std_ms", "flops_per_frame"):
-                raw = row.get(key, "").strip()
-                try:
-                    entry[key] = float(raw) if raw else None
-                except ValueError:
-                    entry[key] = None
-            # Only cache if at least one latency value is non-None and non-zero
-            if any(entry.get(k) for k in ("latency_p95_ms", "latency_mean_ms")):
-                cache[model] = entry
-    return cache
-
-
-def _find_model_class_by_dir_name(dir_name: str):
-    """Return the model *class* whose .name matches dir_name (with _ → space)."""
-    from .models import MODEL_REGISTRY
-
-    target = dir_name.replace("_", " ")
-    for cls in MODEL_REGISTRY.values():
-        try:
-            if cls().name == target:
-                return cls
-        except Exception:
+    by_model_threshold: dict[str, dict[str, list[float]]] = defaultdict(lambda: defaultdict(list))
+    for r in results:
+        if r.get("status") != "OK":
             continue
-    return None
-
-
-def compute_metrics_on_output(
-    output_dir: Path = OUTPUT_DIR,
-    gt_dir: Path = GROUND_TRUTH_DIR,
-    videos_dir: Path = VIDEOS_DIR,
-    model_filter: list[str] | None = None,
-    threshold: float = 0.5,
-    measure_missing_latency: bool = True,
-    on_result: Callable[[dict], None] | None = None,
-    on_latency_status: Callable[[str], None] | None = None,
-) -> list[dict]:
-    """
-    Compute quality metrics on previously generated *_mask.mp4 files.
-
-    Latency/FLOPs are resolved in this order:
-      1. Read from benchmark_results.csv (cache).
-      2. If not cached and measure_missing_latency=True: load the model,
-         run measure_latency() on a reference video, then unload.
-      3. Otherwise left as None.
-
-    Args:
-        output_dir:               Root output directory (contains masks/).
-        gt_dir:                   Folder of ground-truth videos/images.
-        videos_dir:               Folder of source videos (needed for FWE).
-        model_filter:             If set, only process these model_dir names.
-        threshold:                Binarisation threshold forwarded to metrics.
-        measure_missing_latency:  Re-measure latency when not in CSV.
-        on_result:                Callback fired with each result dict.
-        on_latency_status:        Callback fired with status strings during
-                                  latency measurement.
-
-    Returns:
-        List of result dicts (same schema as run_benchmark).
-    """
-    from .metrics import compute_boundary_f_measure, compute_flow_warping_error, compute_iou
-
-    masks_root = output_dir / "masks"
-    if not masks_root.is_dir():
-        logger.warning("No masks/ folder found in %s", output_dir)
-        return []
-
-    # ── Step 0: load latency cache ────────────────────────────────────────────
-    latency_cache = _load_cached_latency(output_dir)
-    logger.info("Latency cache: %d models found in CSV.", len(latency_cache))
-
-    # Find one reference video for latency measurement (any will do)
-    ref_videos = sorted(videos_dir.glob("*.mp4")) if videos_dir.is_dir() else []
-    ref_video: Path | None = ref_videos[0] if ref_videos else None
-
-    all_results: list[dict] = []
-
-    model_dirs = sorted(
-        d
-        for d in masks_root.iterdir()
-        if d.is_dir() and (model_filter is None or d.name in model_filter)
-    )
-
-    for model_dir in model_dirs:
-        model_name = model_dir.name.replace("_", " ")
-        mask_files = sorted(model_dir.glob("*_mask.mp4"))
-        if not mask_files:
+        ta = r.get("threshold_analysis")
+        if not ta:
             continue
-
-        # ── Step 1: resolve latency for this model ────────────────────────────
-        lat_entry: dict = latency_cache.get(model_name, {})
-
-        if not lat_entry and measure_missing_latency and ref_video is not None:
-            model_cls = _find_model_class_by_dir_name(model_dir.name)
-            if model_cls is not None:
-                try:
-                    msg = f"Mesure de la latence pour {model_name}…"
-                    logger.info(msg)
-                    if on_latency_status:
-                        on_latency_status(msg)
-
-                    model_inst = model_cls()
-                    model_inst.load()
-
-                    # FLOPs: use first frame resolution from the reference video
-                    _, _, (w_ref, h_ref) = _get_video_info(ref_video)
-                    flops = model_inst.get_flops((3, h_ref, w_ref))
-
-                    lat_result = run_inference(
-                        model_inst, ref_video, output_dir, collect_masks=False
-                    )
-                    lat_entry = {**lat_result, "flops_per_frame": flops}
-                    model_inst.cleanup()
-
-                    msg = f"Latence {model_name}: p95={lat_entry['latency_p95_ms']:.1f} ms"
-                    logger.info(msg)
-                    if on_latency_status:
-                        on_latency_status(msg)
-                except Exception as lat_err:
-                    logger.warning("Latency measurement failed for %s: %s", model_name, lat_err)
-                    if on_latency_status:
-                        on_latency_status(f"⚠️ Latence non disponible pour {model_name}: {lat_err}")
-            else:
-                logger.warning("Model class not found for dir '%s'.", model_dir.name)
-                if on_latency_status:
-                    on_latency_status(f"⚠️ Classe modèle introuvable pour {model_dir.name}")
-
-        # ── Step 2: compute quality metrics per video ─────────────────────────
-        for mask_file in mask_files:
-            video_stem = mask_file.stem.replace(f"_{model_dir.name}_mask", "")
-            gt_path = gt_dir / f"{video_stem}.mp4"
-            video_path = videos_dir / f"{video_stem}.mp4"
-
-            result_entry: dict = {
-                "model": model_name,
-                "video": f"{video_stem}.mp4",
-                "status": "OK",
-                **lat_entry,
-            }
-
-            try:
-                pred_masks = load_masks_from_mask_video(mask_file)
-                if not pred_masks:
-                    raise ValueError(f"No frames in {mask_file}")
-
-                gt_masks = (
-                    _load_ground_truth_masks(gt_path, len(pred_masks)) if gt_path.exists() else []
+        for t_str, metrics in ta.items():
+            if "iou_mean" not in metrics:
+                raise RuntimeError(
+                    f"threshold_analysis pour {r.get('model')} / {r.get('video')} "
+                    f"au seuil {t_str} n'a pas d'iou_mean."
                 )
+            by_model_threshold[r["model"]][t_str].append(float(metrics["iou_mean"]))
 
-                if not gt_masks:
-                    logger.warning("No GT found for %s.", video_stem)
-                    result_entry["status"] = "NO_GT"
-                    all_results.append(result_entry)
-                    if on_result:
-                        try:
-                            on_result(result_entry)
-                        except Exception:
-                            pass
-                    continue
-
-                n = min(len(pred_masks), len(gt_masks))
-
-                iou = compute_iou(pred_masks[:n], gt_masks[:n], threshold=threshold)
-
-                bf_scores = [
-                    compute_boundary_f_measure(p, g, threshold=threshold)
-                    for p, g in zip(pred_masks[:n], gt_masks[:n], strict=True)
-                ]
-
-                fwe = 0.0
-                if video_path.exists():
-                    fwe = compute_flow_warping_error(
-                        pred_masks[:n],
-                        _iter_video_frames(video_path),
-                        threshold=threshold,
-                    )
-                else:
-                    logger.warning("Source video not found for FWE: %s", video_path)
-
-                result_entry.update(
-                    {
-                        "iou_mean": round(iou, 4),
-                        "iou_std": 0.0,
-                        "boundary_f_mean": round(float(np.mean(bf_scores)), 4),
-                        "boundary_f_std": round(float(np.std(bf_scores)), 4),
-                        "flow_warping_error": round(fwe, 4),
-                        "num_frames": n,
-                        "threshold": threshold,
-                    }
-                )
-
-                logger.info(
-                    "%s / %s — IoU=%.4f  BF=%.4f  FWE=%.4f",
-                    model_name,
-                    video_stem,
-                    iou,
-                    np.mean(bf_scores),
-                    fwe,
-                )
-
-            except Exception as e:
-                logger.error("metrics error %s / %s: %s", model_name, video_stem, e)
-                result_entry["status"] = "ERROR"
-                result_entry["error"] = str(e)
-
-            all_results.append(result_entry)
-            if on_result is not None:
-                try:
-                    on_result(result_entry)
-                except Exception as cb_exc:
-                    logger.debug("on_result callback error: %s", cb_exc)
-
-    _save_csv_report(all_results, output_dir)
-    _save_json_report(all_results, output_dir)
-    logger.info("Post-hoc metrics done: %d results saved.", len(all_results))
-    return all_results
+    best: dict[str, float] = {}
+    for model_name, per_threshold in by_model_threshold.items():
+        # Vérifier que tous les seuils ont le même nombre d'échantillons
+        counts = {len(v) for v in per_threshold.values()}
+        if len(counts) > 1:
+            raise RuntimeError(
+                f"Analyse de seuils incohérente pour {model_name}: "
+                f"nombre d'échantillons varie selon le seuil ({counts})."
+            )
+        means = {float(t): sum(v) / len(v) for t, v in per_threshold.items()}
+        best_t = max(means, key=lambda k: means[k])
+        best[model_name] = best_t
+        logger.info(
+            "🎯 Meilleur seuil pour %s : %.2f (IoU moyen = %.4f)",
+            model_name,
+            best_t,
+            means[best_t],
+        )
+    return best
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Report generation
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-def _save_csv_report(results: list[dict], output_dir: Path) -> None:
-    """Sauvegarde les résultats en CSV.
+def _save_csv_report(
+    results: list[dict],
+    output_dir: Path,
+    analyze_thresholds: bool = False,
+) -> None:
+    """Sauvegarde les résultats en CSV — une ligne par (modèle, vidéo).
 
-    Si un résultat contient threshold_analysis (benchmark lancé avec
-    analyze_thresholds=True), il est explosé en N lignes — une par seuil
-    testé. Sinon une ligne par (modèle, vidéo) avec threshold=0.5 (défaut).
+    Quand analyze_thresholds=True, une colonne `best_threshold` est ajoutée
+    et les métriques iou_mean, boundary_f_mean, flow_warping_error
+    correspondent à ce meilleur seuil (déjà résolu par le caller).
     """
     if not results:
         return
 
     csv_path = output_dir / RESULTS_CSV_FILENAME
-    fieldnames = [
+
+    base_fields = [
         "model",
         "video",
         "threshold",
@@ -1232,32 +1175,29 @@ def _save_csv_report(results: list[dict], output_dir: Path) -> None:
         "latency_p95_ms",
         "latency_mean_ms",
         "latency_std_ms",
-        "flops_per_frame",
+        "fps",
+        "pipeline_fps",
+        "wall_clock_s",
         "iou_mean",
         "boundary_f_mean",
         "boundary_f_std",
         "flow_warping_error",
         "error",
     ]
+    if analyze_thresholds:
+        fieldnames = ["model", "video", "best_threshold"] + base_fields[2:]
+    else:
+        fieldnames = base_fields
 
     rows: list[dict] = []
     for r in results:
-        ta = r.get("threshold_analysis")
-        base = {k: v for k, v in r.items() if k != "threshold_analysis"}
-
-        if ta:
-            # One row per threshold value
-            for t_str, metrics in sorted(ta.items(), key=lambda x: float(x[0])):
-                row = {
-                    **base,
-                    "threshold": float(t_str),
-                    "iou_mean": metrics["iou_mean"],
-                    "boundary_f_mean": metrics["boundary_f_mean"],
-                }
-                rows.append(row)
-        else:
-            row = {**base, "threshold": base.get("threshold", 0.5)}
-            rows.append(row)
+        row = {k: v for k, v in r.items() if k != "threshold_analysis"}
+        if analyze_thresholds and r.get("status") == "OK" and "best_threshold" not in row:
+            raise RuntimeError(
+                f"analyze_thresholds=True mais best_threshold manquant pour "
+                f"{r.get('model')} / {r.get('video')}. Anomalie dans la pipeline."
+            )
+        rows.append(row)
 
     with open(csv_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")

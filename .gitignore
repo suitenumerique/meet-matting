@@ -65,3 +65,7 @@ dist/
 CLAUDE.md
 .claude/
 claude_pipeline_architecture.md
+
+# Graphify
+graphify-out/
+.graphify_root

@@ -302,8 +302,8 @@ def compute_flow_warping_error(
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def _compute_single_frame_bf(args: tuple) -> float:
     """Helper picklable pour ThreadPoolExecutor."""
-    pred, gt, disk = args
-    return compute_boundary_f_measure(pred, gt, _disk=disk)
+    pred, gt, disk, threshold = args
+    return compute_boundary_f_measure(pred, gt, threshold=threshold, _disk=disk)
 
 
 def compute_all_metrics(
@@ -343,7 +343,7 @@ def compute_all_metrics(
 
     # BF en parallèle (ThreadPool — OpenCV libère le GIL pour les ops morpho)
     n_workers = min(8, n)
-    args = [(p, g, disk) for p, g in zip(pred_masks[:n], gt_masks[:n], strict=True)]
+    args = [(p, g, disk, threshold) for p, g in zip(pred_masks[:n], gt_masks[:n], strict=True)]
     with ThreadPoolExecutor(max_workers=n_workers) as executor:
         boundary_fs = list(executor.map(_compute_single_frame_bf, args))
 

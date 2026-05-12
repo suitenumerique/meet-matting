@@ -60,32 +60,20 @@ class MODNetWrapper(BaseModelWrapper):
             logger.info("MODNet: téléchargement du modèle depuis %s", _MODEL_URL)
             self._download_model()
 
-        providers = ort.get_available_providers()
-        selected_providers = []
-        if "CoreMLExecutionProvider" in providers:
-            selected_providers.append("CoreMLExecutionProvider")
-        if "CUDAExecutionProvider" in providers:
-            selected_providers.append("CUDAExecutionProvider")
-        selected_providers.append("CPUExecutionProvider")
-
         sess_options = ort.SessionOptions()
         sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        sess_options.log_severity_level = 4
 
-        # CoreML specific optimizations if on Mac
-        actual_providers: list[str | tuple[str, dict[str, Any]]] = []
-        for p in selected_providers:
-            if p == "CoreMLExecutionProvider":
-                actual_providers.append(
-                    (
-                        "CoreMLExecutionProvider",
-                        {
-                            "MLComputeUnits": "ALL",
-                            "convert_model_to_fp16": True,  # Enable FP16 inference on Mac
-                        },
-                    )
-                )
-            else:
-                actual_providers.append(p)
+        providers = ort.get_available_providers()
+        # CoreML couvre seulement 48% des nœuds de MODNet (4 partitions), ce qui
+        # génère plus de transferts CPU↔ANE que de gain GPU. CPU seul est 12% plus rapide.
+        if "CUDAExecutionProvider" in providers:
+            actual_providers: list[str | tuple[str, dict[str, Any]]] = [
+                "CUDAExecutionProvider",
+                "CPUExecutionProvider",
+            ]
+        else:
+            actual_providers = ["CPUExecutionProvider"]
 
         self._session = ort.InferenceSession(
             str(self._model_path), providers=actual_providers, sess_options=sess_options

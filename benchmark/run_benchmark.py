@@ -57,7 +57,7 @@ Modèles disponibles :
   trimap_matting              Trimap-based Matting (GrabCut)
   modnet                      MODNet
   pphumanseg_v2               PP-HumanSeg V2
-  efficient_vit               EfficientViT
+  segformer                   SegFormer-B0 (ADE20K, transformer-light)
         """,
     )
 
@@ -118,6 +118,17 @@ Modèles disponibles :
         help="Applique le masque sur la vidéo source et sauvegarde le sujet sur fond noir.",
     )
     parser.add_argument(
+        "--threshold",
+        type=float,
+        default=0.5,
+        help="Seuil de binarisation des masques (défaut : 0.5). Ignoré si --analyze-thresholds.",
+    )
+    parser.add_argument(
+        "--analyze-thresholds",
+        action="store_true",
+        help="Active le balayage de seuils [0.1, 0.9] et calcule le meilleur seuil par modèle.",
+    )
+    parser.add_argument(
         "--log-level",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
         default=LOG_LEVEL,
@@ -167,7 +178,7 @@ def main() -> None:
         args.gt_dir.mkdir(parents=True, exist_ok=True)
 
     # ── Lancer le benchmark ──
-    results = run_benchmark(
+    bench = run_benchmark(
         models=models,
         videos_dir=args.videos_dir,
         gt_dir=args.gt_dir,
@@ -178,7 +189,12 @@ def main() -> None:
         save_masks=args.save_masks,
         save_video=args.save_video,
         save_segmented=args.save_segmented,
+        analyze_thresholds=args.analyze_thresholds,
+        threshold=args.threshold,
     )
+    results = bench["results"]
+    global_fps = bench["global_pipeline_fps"]
+    best_thresholds = bench["best_thresholds"]
 
     if not results:
         logger.warning("Aucun résultat produit. Vérifie tes données.")
@@ -189,7 +205,11 @@ def main() -> None:
     print("📊 RÉSUMÉ DU BENCHMARK")
     print("=" * 72)
 
-    header = f"{'Modèle':<30s} {'Vidéo':<20s} {'IoU':>8s} {'BndF':>8s} {'FWE':>8s} {'p95(ms)':>10s} {'FLOPs':>12s}"
+    header = (
+        f"{'Modèle':<30s} {'Vidéo':<20s} "
+        f"{'IoU':>8s} {'BndF':>8s} {'FWE':>8s} "
+        f"{'p95(ms)':>10s} {'FPS':>8s} {'pipFPS':>8s}"
+    )
     print(header)
     print("─" * len(header))
 
@@ -206,15 +226,23 @@ def main() -> None:
             else "N/A"
         )
         p95 = f"{r.get('latency_p95_ms', 0):.2f}"
-        flops = r.get("flops_per_frame", -1)
-        flops_str = f"{flops:.2e}" if flops and flops > 0 else "N/A"
+        fps_val = r.get("fps", 0)
+        fps_str = f"{fps_val:.1f}" if fps_val else "N/A"
+        pipe_val = r.get("pipeline_fps", 0)
+        pipe_str = f"{pipe_val:.1f}" if pipe_val else "N/A"
 
         print(
-            f"{r['model']:<30s} {r['video']:<20s} {iou:>8s} {bf:>8s} "
-            f"{fwe:>8s} {p95:>10s} {flops_str:>12s}"
+            f"{r['model']:<30s} {r['video']:<20s} "
+            f"{iou:>8s} {bf:>8s} {fwe:>8s} "
+            f"{p95:>10s} {fps_str:>8s} {pipe_str:>8s}"
         )
 
     print("=" * 72)
+    print(f"FPS pipeline global : {global_fps:.2f}")
+    if best_thresholds:
+        print("Meilleurs seuils par modèle (argmax IoU moyen) :")
+        for m, t in sorted(best_thresholds.items()):
+            print(f"  {m:<30s}  →  {t:.2f}")
     print(f"📁 Rapports : {args.output_dir}/")
     print()
 

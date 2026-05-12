@@ -74,6 +74,7 @@ class PPHumanSegV2Wrapper(BaseModelWrapper):
 
         sess_options = ort.SessionOptions()
         sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        sess_options.log_severity_level = 4  # Supprime les warnings CoreML de partitionnement
 
         # CoreML specific optimizations if on Mac
         actual_providers: list[str | tuple[str, dict[str, Any]]] = []
@@ -82,10 +83,7 @@ class PPHumanSegV2Wrapper(BaseModelWrapper):
                 actual_providers.append(
                     (
                         "CoreMLExecutionProvider",
-                        {
-                            "MLComputeUnits": "ALL",
-                            "convert_model_to_fp16": True,  # Enable FP16 inference on Mac
-                        },
+                        {"MLComputeUnits": "ALL"},
                     )
                 )
             else:

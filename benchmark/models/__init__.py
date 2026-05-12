@@ -8,7 +8,6 @@ Chaque wrapper hérite de BaseModelWrapper et implémente :
 """
 
 from .base import BaseModelWrapper
-from .efficient_vit import EfficientViTWrapper
 from .mediapipe_multiclass import MediapipeSelfieMulticlassWrapper
 from .mediapipe_selfie import (
     MediapipeLandscapeWrapper,
@@ -18,6 +17,7 @@ from .mobilenetv3_lraspp import MobileNetV3LRASPPWrapper
 from .modnet import MODNetWrapper
 from .pphumanseg import PPHumanSegV2Wrapper
 from .rvm import RVMWrapper
+from .segformer import SegFormerWrapper
 from .trimap_matting import TrimapMattingWrapper
 
 # Registre de tous les modèles disponibles pour le benchmark
@@ -30,7 +30,7 @@ MODEL_REGISTRY: dict[str, type[BaseModelWrapper]] = {
     "trimap_matting": TrimapMattingWrapper,
     "modnet": MODNetWrapper,
     "pphumanseg_v2": PPHumanSegV2Wrapper,
-    "efficient_vit": EfficientViTWrapper,
+    "segformer": SegFormerWrapper,
 }
 
 __all__ = [
@@ -44,5 +44,5 @@ __all__ = [
     "TrimapMattingWrapper",
     "MODNetWrapper",
     "PPHumanSegV2Wrapper",
-    "EfficientViTWrapper",
+    "SegFormerWrapper",
 ]

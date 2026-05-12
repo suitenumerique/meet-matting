@@ -19,11 +19,11 @@ Ten model wrappers, all sharing the [`BaseModelWrapper`](models/base.py) interfa
 | `mediapipe_landscape` | MediaPipe Selfie Landscape | TFLite | 256×256 | Landscape orientation |
 | `mediapipe_selfie_multiclass` | MediaPipe Multiclass | TFLite | 256×256 | 5 classes (person, hair, skin…) |
 | `mediapipe_pose` | MediaPipe Pose Segmentation | TFLite | Dynamic | Pose-driven mask |
-| `rvm` | Robust Video Matting | ONNX | Dynamic | **Recurrent** (GRU state) — best temporal coherence |
+| `rvm` | Robust Video Matting | PyTorch (MPS) | Dynamic | **Recurrent** (GRU state) — best temporal coherence |
 | `mobilenetv3_lraspp` | MobileNetV3 LR-ASPP | PyTorch | Dynamic | Lightweight pyramid decoder |
 | `modnet` | MODNet | ONNX | 512×512 | High-quality portrait alpha matting |
 | `pphumanseg_v2` | PP-HumanSeg V2 | ONNX | Dynamic | Lightweight PaddlePaddle model |
-| `efficient_vit` | EfficientViT-Seg | ONNX | 224×224 | Vision Transformer (ADE20K, person class #12) |
+| `segformer` | SegFormer-B0 | PyTorch (MPS) | 512×512 | Transformer-light (ADE20K, person class #12) |
 | `trimap_matting` | Trimap GrabCut | OpenCV | Dynamic | Morphological baseline |
 
 To add a model: subclass `BaseModelWrapper`, implement `predict(frame_bgr) → mask float32 [0, 1]`, and register it in [`models/__init__.py`](models/__init__.py).

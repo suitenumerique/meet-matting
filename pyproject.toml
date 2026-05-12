@@ -13,6 +13,8 @@ dependencies = [
     "torchvision>=0.15.0",
     # Inference
     "onnxruntime>=1.16.0",
+    # SegFormer (transformer-light seg, modèle hébergé HuggingFace)
+    "transformers>=4.30.0",
     # MediaPipe
     "mediapipe>=0.10.0",
     # FLOPs
